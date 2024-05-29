@@ -31,7 +31,7 @@ class HistogramFilter(Node):
         self.declare_parameter('histogram_bins', 15)
         self.declare_parameter('histogram_range_m', [0.12, 3.5])
         self.declare_parameter('histogram_comparison', 'euclidean')
-        self.declare_parameter('map_pkl_file', 'turtlebot3_dqn_stage4_0.1.pkl')
+        self.declare_parameter('map_pkl_file', 'turtlebot3_dqn_stage4_0.25.pkl')
 
         # Get parameters
         self.histogram_bins = self.get_parameter('histogram_bins').get_parameter_value().integer_value
@@ -209,8 +209,10 @@ def main(args=None):
     node = HistogramFilter()
     node.load_scan_data()
     node.convert_scan_data_to_histograms()
-    rclpy.spin(node)
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        node.destroy_node()
 
 
 if __name__ == "__main__":
