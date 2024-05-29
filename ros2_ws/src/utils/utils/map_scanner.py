@@ -37,6 +37,7 @@ class MapScanner(Node):
         self.declare_parameter('map_pgm_file', 'turtlebot3_dqn_stage4.pgm')
         self.declare_parameter('map_yaml_file', 'turtlebot3_dqn_stage4.yaml')
         self.declare_parameter('scan_data_name', 'scan_data.pkl')
+        self.declare_parameter('scan_step_m', 0.1)
 
         # Get parameters
         self.robot_width_m = self.get_parameter('robot_width_m').get_parameter_value().double_value
@@ -45,6 +46,16 @@ class MapScanner(Node):
         self.map_pgm_file = self.get_parameter('map_pgm_file').get_parameter_value().string_value
         self.map_yaml_file = self.get_parameter('map_yaml_file').get_parameter_value().string_value
         self.scan_data_name = self.get_parameter('scan_data_name').get_parameter_value().string_value
+        self.scan_step_m = self.get_parameter('scan_step_m').get_parameter_value().double_value
+
+        # Log the parameters
+        self.get_logger().info(f"robot_width_m: {self.robot_width_m}")
+        self.get_logger().info(f"robot_length_m: {self.robot_length_m}")
+        self.get_logger().info(f"robot_center_offset_m: {self.robot_center_offset_m}")
+        self.get_logger().info(f"map_pgm_file: {self.map_pgm_file}")
+        self.get_logger().info(f"map_yaml_file: {self.map_yaml_file}")
+        self.get_logger().info(f"scan_data_name: {self.scan_data_name}")
+        self.get_logger().info(f"scan_step_m: {self.scan_step_m}")
 
         # Get the directory of the package source directory
         package_source_directory = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -176,7 +187,8 @@ class MapScanner(Node):
                     while not self.new_scan_received:
                         rclpy.spin_once(self)
 
-        self.save_scan_data(self.scan_data_name)
+        self.get_logger().info(f"Saving scan data at {self.scan_data_path}")
+        self.save_scan_data(self.scan_data_path)
 
     def scan_callback(self, msg: LaserScan) -> None:
         """
@@ -198,13 +210,12 @@ class MapScanner(Node):
             self.get_logger().info(f"[{self.scan_counter}] scan taken at position: (X: {scan_data.position[0]:.2f} [m], Y: {scan_data.position[1]:.2f} [m], θ: {scan_data.position[2]:.2f} [°])")
 
 
-
 def main(args=None):
     rclpy.init(args=args)
     node = MapScanner()
     node.load_map()
     try:
-        node.spawn_robot_across_map(step=0.1, x_min=-3, x_max=3, y_min=-3, y_max=3)
+        node.spawn_robot_across_map(step=node.scan_step_m, x_min=-3, x_max=3, y_min=-3, y_max=3)
     except KeyboardInterrupt:
         node.get_logger().info("Keyboard Interrupt (Ctrl+C) detected. Shutting down...")
         node.get_logger().info(f"Saving scan data at {node.scan_data_path}")
