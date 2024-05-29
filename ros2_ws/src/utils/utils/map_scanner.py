@@ -9,7 +9,6 @@ import rclpy
 from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
-from config.robot import *
 from utils.map_loader import MapLoader
 from utils.scan_data import ScanData
 from utils.srv_handler_entity import SrvHandlerEntity
@@ -17,20 +16,52 @@ from utils.srv_handler_physics import SrvHandlerPhysics
 
 
 class MapScanner(Node):
+    """
+    Class representing a map scanner node.
+
+    This node is responsible for scanning the map with given resolution and range.
+    """
+
     def __init__(self):
+        """
+        Initializes an instance of the MapScanner class.
+        """
+
         super().__init__("map_scanner")
         self.get_logger().info("MapScanner node started.")
+
+        # Declare parameters with default values
+        self.declare_parameter('robot_width_m', 0.178)
+        self.declare_parameter('robot_length_m', 0.14)
+        self.declare_parameter('robot_center_offset_m', 0.032)
+        self.declare_parameter('map_pgm_file', 'turtlebot3_dqn_stage4.pgm')
+        self.declare_parameter('map_yaml_file', 'turtlebot3_dqn_stage4.yaml')
+        self.declare_parameter('laser_scan_data_path', '/home/mkaniews/Desktop/scan_data.pkl')
+
+        # Get parameters
+        self.robot_width_m = self.get_parameter('robot_width_m').get_parameter_value().double_value
+        self.robot_length_m = self.get_parameter('robot_length_m').get_parameter_value().double_value
+        self.robot_center_offset_m = self.get_parameter('robot_center_offset_m').get_parameter_value().double_value
+        self.map_pgm_file = self.get_parameter('map_pgm_file').get_parameter_value().string_value
+        self.map_yaml_file = self.get_parameter('map_yaml_file').get_parameter_value().string_value
+        self.laser_scan_data_path = self.get_parameter('laser_scan_data_path').get_parameter_value().string_value
+
+        # Create service handlers
         self.entity_srv_handler = SrvHandlerEntity(self)
         self.physics_srv_handler = SrvHandlerPhysics(self)
 
-        self.scan_subscription = self.create_subscription(
-            LaserScan, "/scan", self.scan_callback, 10
-        )
+        # Create /scan subscription
+        self.scan_subscription = self.create_subscription(LaserScan, "/scan", self.scan_callback, 10)
 
-        self.robot_x = 0.0
-        self.robot_y = 0.0
-        self.robot_theta = 0.0
+        # Robot position
+        self.robot_x_m = 0.0
+        self.robot_y_m = 0.0
+        self.robot_theta_deg = 0.0
+        
+        # Scan data
         self.laser_scan_data = np.array([])
+        self.new_scan_received = True
+        self.scan_counter = 0
 
     def load_map(self) -> None:
         """
@@ -40,13 +71,13 @@ class MapScanner(Node):
         world_pgm_path = os.path.join(
             get_package_share_directory("utils"),
             "maps_pgm",
-            "turtlebot3_dqn_stage4.pgm",
+            self.map_pgm_file
         )
 
         world_yaml_path = os.path.join(
             get_package_share_directory("utils"),
             "maps_yaml",
-            "turtlebot3_dqn_stage4.yaml",
+            self.map_yaml_file
         )
 
         pgm_map = MapLoader(world_yaml_path, world_pgm_path)
@@ -65,10 +96,18 @@ class MapScanner(Node):
             pickle.dump(self.laser_scan_data, file)
 
     def set_entity_state(self, x_set: float, y_set: float, theta_set: float) -> None:
+        """
+        Sets the entity state to the specified position and orientation.
 
-        self.robot_x = x_set
-        self.robot_y = y_set
-        self.robot_theta = theta_set
+        Args:
+            x_set (float): The x-coordinate of the position.
+            y_set (float): The y-coordinate of the position.
+            theta_set (float): The orientation angle in degrees.
+        """
+
+        self.robot_x_m = x_set
+        self.robot_y_m = y_set
+        self.robot_theta_deg = theta_set
         self.entity_srv_handler.send_request(x_set, y_set, theta_set)
 
     def pause_physics(self) -> None:
@@ -98,9 +137,9 @@ class MapScanner(Node):
         """
 
         # fmt: off
-        robot_half_width = TURTLEBOT3_BURGER_WIDTH_M / 2
-        robot_top_length = (TURTLEBOT3_BURGER_LENGTH_M / 2 - TURTLEBOT3_BURGER_CENTER_OFFSET_M)
-        robot_bottom_length = (TURTLEBOT3_BURGER_LENGTH_M / 2 + TURTLEBOT3_BURGER_CENTER_OFFSET_M)
+        robot_half_width = self.robot_width_m / 2
+        robot_top_length = (self.robot_length_m / 2 - self.robot_center_offset_m)
+        robot_bottom_length = (self.robot_length_m / 2 + self.robot_center_offset_m)
 
         for obstacle_x, obstacle_y in self.obstacle_coordinates:
             y_distance = abs(y - obstacle_y)
@@ -125,29 +164,48 @@ class MapScanner(Node):
         for y in np.arange(y_min, y_max + step, step):
             for x in np.arange(x_min, x_max + step, step):
                 if not self.is_position_near_obstacle(x, y):
-                    self.pause_physics()
+                    #self.pause_physics()
                     self.set_entity_state(x, y, 90)
-                    self.unpause_physics()
+                    #self.unpause_physics()
                     time.sleep(1)
-                    rclpy.spin_once(self)
+                    self.new_scan_received = False
+                    while not self.new_scan_received:
+                        rclpy.spin_once(self)
+
+        self.save_laser_scan_data(self.laser_scan_data_path)
 
     def scan_callback(self, msg: LaserScan) -> None:
+        """
+        Callback function for the laser scan message.
 
-        scan_data = ScanData(
-            position=(self.robot_x, self.robot_y, self.robot_theta),
-            measurements=msg.ranges,
-        )
-        self.laser_scan_data = np.append(self.laser_scan_data, scan_data)
+        Args:
+            msg (LaserScan): The laser scan message.
+        """
+        
+        if not self.new_scan_received:
+            scan_data = ScanData(
+                position=(self.robot_x_m, self.robot_y_m, self.robot_theta_deg),
+                measurements=msg.ranges,
+            )
+            self.laser_scan_data = np.append(self.laser_scan_data, scan_data)
+            self.new_scan_received = True
+
+            self.scan_counter += 1
+            self.get_logger().info(f"[{self.scan_counter}] scan taken at position: (X: {scan_data.position[0]:.2f} [m], Y: {scan_data.position[1]:.2f} [m], θ: {scan_data.position[2]:.2f} [°])")
+
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = MapScanner()
     node.load_map()
-    node.spawn_robot_across_map(step=0.1, x_min=-3, x_max=3, y_min=2.1, y_max=3)
-    node.save_laser_scan_data("/home/mkaniews/Desktop/test_6.pkl")
-    node.destroy_node()
-
+    try:
+        node.spawn_robot_across_map(step=0.1, x_min=-3, x_max=3, y_min=-3, y_max=3)
+    except KeyboardInterrupt:
+        node.get_logger().info("Keyboard Interrupt (Ctrl+C) detected. Shutting down...")
+        node.get_logger().info(f"Saving laser scan data at {node.laser_scan_data_path}...")
+        node.save_laser_scan_data(node.laser_scan_data_path)
+        node.destroy_node()
 
 if __name__ == "__main__":
     main()

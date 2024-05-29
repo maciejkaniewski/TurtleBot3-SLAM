@@ -1,7 +1,6 @@
 import os
 from glob import glob
 
-
 from setuptools import find_packages, setup
 
 package_name = "utils"
@@ -15,6 +14,7 @@ setup(
         ("share/" + package_name, ["package.xml"]),
         (os.path.join("share", package_name, "maps_pgm"), glob("maps_pgm/*.pgm")),
         (os.path.join("share", package_name, "maps_yaml"), glob("maps_yaml/*.yaml")),
+        (os.path.join('share', package_name, 'config'), glob('config/*.yaml'))
     ],
     install_requires=["setuptools"],
     zip_safe=True,
