@@ -1,0 +1,6 @@
+/histogram_filter:
+  ros__parameters:
+    histogram_bins: 15
+    histogram_range_m: [0.12, 3.5]
+    histogram_comparison: 'euclidean'
+    map_pkl_file: 'turtlebot3_dqn_stage4_0.1.pkl'
