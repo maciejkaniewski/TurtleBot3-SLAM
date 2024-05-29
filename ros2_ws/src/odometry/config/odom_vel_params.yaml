@@ -1,0 +1,6 @@
+/odom_vel:
+  ros__parameters:
+    distance_between_wheels_m: 0.160
+    wheel_radius_m: 0.033
+    left_wheel_indx: 0
+    right_wheel_indx: 1

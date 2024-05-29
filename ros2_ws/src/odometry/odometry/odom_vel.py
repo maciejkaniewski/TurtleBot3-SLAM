@@ -3,32 +3,52 @@
 import numpy as np
 import rclpy
 import tf_transformations
+from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.time import Time
 from sensor_msgs.msg import JointState
-from geometry_msgs.msg import PoseStamped
-
-DISTANCE_BETWEEN_WHEELS_M = 0.160
-WHEEL_RADIUS_M = 0.033
-
-LEFT_WHEEL = 0
-RIGHT_WHEEL = 1
 
 
 class OdomVelocity(Node):
+    """
+    Class representing the odometry velocity node.
+
+    This node calculates the odometry of a robot based on the wheel velocities
+    and publishes the odometry information to the `/odom_vel` topic.
+    """
+
     def __init__(self):
+        """
+        Initializes an instance of the OdomVelocity class.
+        """
+
         super().__init__("odom_vel")
         self.get_logger().info("odom_vel node started.")
 
-        self.joint_states_subscription = self.create_subscription(
-            JointState, "/joint_states", self.joint_states_callback, 10
-        )
+        # Declare parameters with default values
+        self.declare_parameter('distance_between_wheels_m', 0.160)
+        self.declare_parameter('wheel_radius_m', 0.033)
+        self.declare_parameter('left_wheel_indx', 0)
+        self.declare_parameter('right_wheel_indx', 1)
 
-        self.odom_subscription = self.create_subscription(
-            Odometry, "/odom", self.odom_callback, 10
-        )
+        # Get parameters
+        self.distance_between_wheels_m = self.get_parameter('distance_between_wheels_m').get_parameter_value().double_value
+        self.wheel_radius_m = self.get_parameter('wheel_radius_m').get_parameter_value().double_value
+        self.left_wheel_indx = self.get_parameter('left_wheel_indx').get_parameter_value().integer_value
+        self.right_wheel_indx= self.get_parameter('right_wheel_indx').get_parameter_value().integer_value
 
+        # Log the parameters
+        self.get_logger().info(f"distance_between_wheels_m: {self.distance_between_wheels_m}")
+        self.get_logger().info(f"wheel_radius_m: {self.wheel_radius_m}")
+        self.get_logger().info(f"left_wheel_indx: {self.left_wheel_indx}")
+        self.get_logger().info(f"right_wheel_indx: {self.right_wheel_indx}")
+
+        # Create /odom and /joint_states subscriptions
+        self.odom_subscription = self.create_subscription(Odometry, "/odom", self.odom_callback, 10)
+        self.joint_states_subscription = self.create_subscription(JointState, "/joint_states", self.joint_states_callback, 10)
+        
+        # Create /odom_vel publisher with a 30 Hz timer
         self.odom_vel_publisher = self.create_publisher(PoseStamped, "/odom_vel", 10)
         self.timer_odom_vel = self.create_timer(1 / 30, self.odom_vel_callback)
 
@@ -44,6 +64,7 @@ class OdomVelocity(Node):
         self.right_wheel_velocity_rad_s = 0.0
         self.left_wheel_velocity_rad_s = 0.0
 
+        # Previous time for odometry calculation
         self.prev_time_ros = None
 
     def calculate_odometry_from_velocities(self, current_time_ros: Time) -> None:
@@ -53,11 +74,13 @@ class OdomVelocity(Node):
         Args:
             current_time_ros (Time): The current time in ROS.
         """
+
         if self.prev_time_ros is not None:
+            
             d_time = (current_time_ros - self.prev_time_ros).nanoseconds / 1e9
 
             # fmt: off
-            d_theta = ((self.right_wheel_velocity_m_s - self.left_wheel_velocity_m_s) / DISTANCE_BETWEEN_WHEELS_M * d_time)
+            d_theta = ((self.right_wheel_velocity_m_s - self.left_wheel_velocity_m_s) / self.distance_between_wheels_m * d_time)
             d_x = ((self.left_wheel_velocity_m_s + self.right_wheel_velocity_m_s) / 2 * d_time * np.cos(self.robot_theta_rad))
             d_y = ((self.left_wheel_velocity_m_s + self.right_wheel_velocity_m_s) / 2 * d_time * np.sin(self.robot_theta_rad))
 
@@ -102,12 +125,12 @@ class OdomVelocity(Node):
             msg (JointState): The joint states message.
         """
 
-        self.left_wheel_velocity_rad_s = msg.velocity[LEFT_WHEEL]
-        self.right_wheel_velocity_rad_s = msg.velocity[RIGHT_WHEEL]
+        self.left_wheel_velocity_rad_s = msg.velocity[self.left_wheel_indx]
+        self.right_wheel_velocity_rad_s = msg.velocity[self.right_wheel_indx]
 
         # Convert the velocities to m/s
-        self.left_wheel_velocity_m_s = self.left_wheel_velocity_rad_s * WHEEL_RADIUS_M
-        self.right_wheel_velocity_m_s = self.right_wheel_velocity_rad_s * WHEEL_RADIUS_M
+        self.left_wheel_velocity_m_s = self.left_wheel_velocity_rad_s * self.wheel_radius_m
+        self.right_wheel_velocity_m_s = self.right_wheel_velocity_rad_s * self.wheel_radius_m
 
         current_time_ros = Time.from_msg(msg.header.stamp)
         self.calculate_odometry_from_velocities(current_time_ros)
@@ -132,6 +155,7 @@ class OdomVelocity(Node):
 
         self.destroy_subscription(self.odom_subscription)
         self.get_logger().info("Unsubscribed from /odom topic.")
+        self.get_logger().info("Publishing to /odom_vel topic.")
 
 
 def main(args=None):
@@ -141,7 +165,6 @@ def main(args=None):
         rclpy.spin(node)
     except KeyboardInterrupt:
         node.destroy_node()
-        rclpy.shutdown()
 
 
 if __name__ == "__main__":
