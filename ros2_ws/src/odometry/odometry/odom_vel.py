@@ -27,22 +27,22 @@ class OdomVelocity(Node):
         self.get_logger().info("odom_vel node started.")
 
         # Declare parameters with default values
-        self.declare_parameter('distance_between_wheels_m', 0.160)
-        self.declare_parameter('wheel_radius_m', 0.033)
         self.declare_parameter('left_wheel_indx', 0)
         self.declare_parameter('right_wheel_indx', 1)
+        self.declare_parameter('wheel_radius_m', 0.033)
+        self.declare_parameter('distance_between_wheels_m', 0.160)
 
         # Get parameters
-        self.distance_between_wheels_m = self.get_parameter('distance_between_wheels_m').get_parameter_value().double_value
-        self.wheel_radius_m = self.get_parameter('wheel_radius_m').get_parameter_value().double_value
         self.left_wheel_indx = self.get_parameter('left_wheel_indx').get_parameter_value().integer_value
         self.right_wheel_indx= self.get_parameter('right_wheel_indx').get_parameter_value().integer_value
+        self.wheel_radius_m = self.get_parameter('wheel_radius_m').get_parameter_value().double_value
+        self.distance_between_wheels_m = self.get_parameter('distance_between_wheels_m').get_parameter_value().double_value
 
         # Log the parameters
-        self.get_logger().info(f"distance_between_wheels_m: {self.distance_between_wheels_m}")
-        self.get_logger().info(f"wheel_radius_m: {self.wheel_radius_m}")
         self.get_logger().info(f"left_wheel_indx: {self.left_wheel_indx}")
         self.get_logger().info(f"right_wheel_indx: {self.right_wheel_indx}")
+        self.get_logger().info(f"wheel_radius_m: {self.wheel_radius_m}")
+        self.get_logger().info(f"distance_between_wheels_m: {self.distance_between_wheels_m}")
 
         # Create /odom and /joint_states subscriptions
         self.odom_subscription = self.create_subscription(Odometry, "/odom", self.odom_callback, 10)
@@ -134,6 +134,9 @@ class OdomVelocity(Node):
 
         current_time_ros = Time.from_msg(msg.header.stamp)
         self.calculate_odometry_from_velocities(current_time_ros)
+
+        # Log the position
+        # self.get_logger().info(f"Robot position: (X: {self.robot_x_m:.2f} [m], Y: {self.robot_y_m:.2f} [m], θ: {np.degrees(self.robot_theta_rad):.2f} [°])")
 
     def odom_callback(self, msg: Odometry) -> None:
         """

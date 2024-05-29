@@ -1,4 +1,4 @@
-/odom_vel:
+/odom_pos:
   ros__parameters:
     left_wheel_indx: 0
     right_wheel_indx: 1
