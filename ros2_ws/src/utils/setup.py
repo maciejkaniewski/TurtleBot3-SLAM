@@ -12,6 +12,7 @@ setup(
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml"]),
+        (os.path.join('share', package_name, 'launch'), glob('launch/*_launch.py')),
         (os.path.join("share", package_name, "maps_pgm"), glob("maps_pgm/*.pgm")),
         (os.path.join("share", package_name, "maps_yaml"), glob("maps_yaml/*.yaml")),
         (os.path.join("share", package_name, "maps_data"), glob("maps_data/*.pkl")),
