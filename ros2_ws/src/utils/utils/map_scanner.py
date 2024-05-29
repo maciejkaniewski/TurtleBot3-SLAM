@@ -36,7 +36,7 @@ class MapScanner(Node):
         self.declare_parameter('robot_center_offset_m', 0.032)
         self.declare_parameter('map_pgm_file', 'turtlebot3_dqn_stage4.pgm')
         self.declare_parameter('map_yaml_file', 'turtlebot3_dqn_stage4.yaml')
-        self.declare_parameter('laser_scan_data_path', '/home/mkaniews/Desktop/scan_data.pkl')
+        self.declare_parameter('scan_data_name', 'scan_data.pkl')
 
         # Get parameters
         self.robot_width_m = self.get_parameter('robot_width_m').get_parameter_value().double_value
@@ -44,7 +44,11 @@ class MapScanner(Node):
         self.robot_center_offset_m = self.get_parameter('robot_center_offset_m').get_parameter_value().double_value
         self.map_pgm_file = self.get_parameter('map_pgm_file').get_parameter_value().string_value
         self.map_yaml_file = self.get_parameter('map_yaml_file').get_parameter_value().string_value
-        self.laser_scan_data_path = self.get_parameter('laser_scan_data_path').get_parameter_value().string_value
+        self.scan_data_name = self.get_parameter('scan_data_name').get_parameter_value().string_value
+
+        # Get the directory of the package source directory
+        package_source_directory = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        self.scan_data_path = os.path.join(package_source_directory, "maps_data", self.scan_data_name)
 
         # Create service handlers
         self.entity_srv_handler = SrvHandlerEntity(self)
@@ -59,7 +63,7 @@ class MapScanner(Node):
         self.robot_theta_deg = 0.0
         
         # Scan data
-        self.laser_scan_data = np.array([])
+        self.scan_data = np.array([])
         self.new_scan_received = True
         self.scan_counter = 0
 
@@ -84,16 +88,16 @@ class MapScanner(Node):
         self.obstacle_coordinates = pgm_map.get_obstacle_coordinates()
         self.obstacle_radius = pgm_map.get_obstacle_radius()
 
-    def save_laser_scan_data(self, file_path: str) -> None:
+    def save_scan_data(self, file_path: str) -> None:
         """
-        Save the laser scan data to a file using pickle.
+        Save the scan data to a file using pickle.
 
         Args:
             file_path (str): The file path to the output file.
         """
 
         with open(file_path, "wb") as file:
-            pickle.dump(self.laser_scan_data, file)
+            pickle.dump(self.scan_data, file)
 
     def set_entity_state(self, x_set: float, y_set: float, theta_set: float) -> None:
         """
@@ -172,7 +176,7 @@ class MapScanner(Node):
                     while not self.new_scan_received:
                         rclpy.spin_once(self)
 
-        self.save_laser_scan_data(self.laser_scan_data_path)
+        self.save_scan_data(self.scan_data_name)
 
     def scan_callback(self, msg: LaserScan) -> None:
         """
@@ -187,7 +191,7 @@ class MapScanner(Node):
                 position=(self.robot_x_m, self.robot_y_m, self.robot_theta_deg),
                 measurements=msg.ranges,
             )
-            self.laser_scan_data = np.append(self.laser_scan_data, scan_data)
+            self.scan_data = np.append(self.scan_data, scan_data)
             self.new_scan_received = True
 
             self.scan_counter += 1
@@ -203,8 +207,8 @@ def main(args=None):
         node.spawn_robot_across_map(step=0.1, x_min=-3, x_max=3, y_min=-3, y_max=3)
     except KeyboardInterrupt:
         node.get_logger().info("Keyboard Interrupt (Ctrl+C) detected. Shutting down...")
-        node.get_logger().info(f"Saving laser scan data at {node.laser_scan_data_path}...")
-        node.save_laser_scan_data(node.laser_scan_data_path)
+        node.get_logger().info(f"Saving scan data at {node.scan_data_path}")
+        node.save_scan_data(node.scan_data_path)
         node.destroy_node()
 
 if __name__ == "__main__":

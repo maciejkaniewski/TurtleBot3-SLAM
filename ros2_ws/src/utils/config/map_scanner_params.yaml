@@ -5,4 +5,4 @@
     robot_center_offset_m: 0.032
     map_pgm_file: 'turtlebot3_dqn_stage4.pgm'
     map_yaml_file: 'turtlebot3_dqn_stage4.yaml'
-    laser_scan_data_path: 'data/scan_data.pkl'
+    scan_data_name: 'scan_data.pkl'
