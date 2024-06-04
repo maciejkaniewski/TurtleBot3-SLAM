@@ -3,6 +3,7 @@
 import os
 import pickle
 
+import matplotlib.pyplot as plt
 import numpy as np
 import rclpy
 import tf_transformations
@@ -30,14 +31,16 @@ class HistogramFilter(Node):
         # Declare parameters with default values
         self.declare_parameter('histogram_bins', 15)
         self.declare_parameter('histogram_range_m', [0.12, 3.5])
-        self.declare_parameter('histogram_comparison', 'euclidean')
-        self.declare_parameter('map_pkl_file', 'turtlebot3_dqn_stage4_0.25.pkl')
+        self.declare_parameter('histogram_comparison', 'manhattan')
+        self.declare_parameter('map_pkl_file', 'turtlebot3_dqn_stage4_0.05.pkl')
+        self.declare_parameter('plot_enabled', True)
 
         # Get parameters
         self.histogram_bins = self.get_parameter('histogram_bins').get_parameter_value().integer_value
         self.histogram_range_m = self.get_parameter('histogram_range_m').get_parameter_value().double_array_value
         self.histogram_comparison = self.get_parameter('histogram_comparison').get_parameter_value().string_value
         self.map_pkl_file = self.get_parameter('map_pkl_file').get_parameter_value().string_value
+        self.plot_enabled = self.get_parameter('plot_enabled').get_parameter_value().bool_value
 
         self.histogram_range_m = tuple(self.histogram_range_m)
 
@@ -46,6 +49,7 @@ class HistogramFilter(Node):
         self.get_logger().info(f"histogram_range_m: {self.histogram_range_m}")
         self.get_logger().info(f"histogram_comparison: {self.histogram_comparison}")
         self.get_logger().info(f"map_pkl_file: {self.map_pkl_file}")
+        self.get_logger().info(f"plot_enabled: {self.plot_enabled}")
 
         # Create /scan and /parameter_events subscriptions
         self.scan_subscription = self.create_subscription(LaserScan, "/scan", self.scan_callback, 10)
@@ -57,6 +61,7 @@ class HistogramFilter(Node):
 
         # Scan data
         self.scan_data = None
+        self.current_scan_data = None
         self.closest_scan_data = None
         self.scan_data_histograms = np.array([])
 
@@ -65,6 +70,17 @@ class HistogramFilter(Node):
         self.robot_y_m = 0.0
         self.robot_theta_rad = 0.0
         self.robot_theta_deg = 0.0
+
+        # Probabilities for the Histogram Filter
+        self.probabilities = []
+        self.probabilties_coords = []
+
+        # Plotting
+        if self.plot_enabled:
+            self.fig, self.ax = plt.subplots(1, 3, figsize=(21, 6))
+            self.fig.canvas.manager.set_window_title('Histogram Filter')
+            self.plot_timer = self.create_timer(1, self.plot_callback)
+            self.cbar_flag = True
 
     def load_scan_data(self):
         """
@@ -100,30 +116,43 @@ class HistogramFilter(Node):
         """
 
         method = self.histogram_comparison
-        if method == 'euclidean':
+        if method == 'manhattan':
             return np.sum(np.abs(hist1 - hist2))
+        if method == 'euclidean':
+            return np.linalg.norm(hist1 - hist2)
         elif method == 'chi_square':
             return np.sum(((hist1 - hist2) ** 2) / (hist1 + hist2 + 1e-10))
-        elif method == 'correlation':
-            return -np.corrcoef(hist1, hist2)[0, 1]
         
-    def localize_robot(self, current_histogram: np.ndarray) -> tuple[float, float, int]:
+    def localize_robot(self, current_histogram: np.ndarray) -> tuple[float, float]:
         """
         Localizes the robot based on the current histogram.
         """
 
-        min_difference = float("inf")
-        estimated_x, estimated_y, best_fit_index = None, None, None
+        estimated_x, estimated_y, index = None, None, None
+
+        self.probabilities = []
+        self.probabilties_coords = []
 
         for i, scan_data in enumerate(self.scan_data_histograms):
             total_difference = self.compare_histograms(scan_data.measurements, current_histogram)
+            self.probabilities.append(total_difference)
+            self.probabilties_coords.append(scan_data.position)
 
-            if total_difference < min_difference:
-                min_difference = total_difference
-                estimated_x, estimated_y, _ = scan_data.position
-                best_fit_index = i
+        # Convert lists to numpy arrays
+        self.probabilities = np.array(self.probabilities)
+        self.probabilties_coords = np.array(self.probabilties_coords)
 
-        self.closest_scan_data = self.scan_data[best_fit_index]
+        # Normalize probabilities to [0, 1] range
+        self.probabilities = self.probabilities - np.min(self.probabilities)
+        self.probabilities = self.probabilities / np.sum(self.probabilities)
+
+        # Invert the probabilities and re-normalize to sum up to 1
+        self.probabilities = (1 - self.probabilities) / np.sum(1 - self.probabilities)
+
+        index = np.argmax(self.probabilities)
+        self.closest_scan_data = self.scan_data[index]
+        estimated_x, estimated_y, _ = self.probabilties_coords[index]
+        
         return estimated_x, estimated_y
 
     def calculate_orientation(self, current_scan_data):
@@ -134,6 +163,7 @@ class HistogramFilter(Node):
         ref_data = self.closest_scan_data.measurements
 
         # Adjust reference data to 0 degrees orientation by shifting the data
+        # Assumed that the data was collected within 90 orientation, if not, adjust the shift value
         adjusted_ref_data = np.roll(ref_data, -90)
 
         # Replace 'inf' values with the maximum valid value from the reference data
@@ -178,7 +208,8 @@ class HistogramFilter(Node):
         Args:
             msg (LaserScan): The incoming laser scan message.
         """
-    
+
+        self.current_scan_data = msg.ranges
         hist, _ = np.histogram(msg.ranges, range=self.histogram_range_m, bins=self.histogram_bins)
         self.robot_x_m, self.robot_y_m = self.localize_robot(hist)
         self.robot_theta_deg = self.calculate_orientation(msg.ranges)
@@ -202,6 +233,93 @@ class HistogramFilter(Node):
             elif changed_parameter.name == 'histogram_comparison':
                 self.get_logger().info(f"histogram_comparison changed to: {changed_parameter.value.string_value}")
                 self.histogram_comparison = changed_parameter.value.string_value
+
+
+    def plot_callback(self) -> None:
+        """
+        Callback function for plotting.
+
+        """
+
+        self.ax[0].cla()
+        self.ax[1].cla()
+        self.ax[2].cla()
+
+        # Plot Current Scan Data
+        self.ax[0].plot(
+            self.current_scan_data,
+            label="Current LaserScan Data",
+            color="#16FF00",
+            linewidth=2,
+        )
+        self.ax[0].fill_between(
+            range(len(self.current_scan_data)),
+            self.current_scan_data,
+            color="#16FF00",
+            alpha=0.3
+        )
+
+        self.ax[0].plot(
+            self.closest_scan_data.measurements,
+            label="Closest LaserScan Data",
+            color="magenta",
+            linewidth=2,
+            linestyle='dashed',
+        )
+        self.ax[0].fill_between(
+            range(len(self.closest_scan_data.measurements)),
+            self.closest_scan_data.measurements,
+            color="magenta",
+            alpha=0.3
+        )
+        self.ax[0].set_xlabel("θ [°]", fontsize=12)
+        self.ax[0].set_ylabel("Distance [m]", fontsize=12)
+        self.ax[0].grid()
+        self.ax[0].legend()
+
+        # Plot the histogram of the current scan data
+        hist, bin_edges = np.histogram(self.current_scan_data, range=self.histogram_range_m, bins=self.histogram_bins)
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        bin_width = bin_edges[1] - bin_edges[0]
+
+        self.ax[1].bar(bin_centers, hist, align="center", width=bin_width, edgecolor="#023EFF", color="#00ffff")
+
+        self.ax[1].set_xlabel("Distance [m]", fontsize=12)
+        self.ax[1].set_ylabel("Measurements Count", fontsize=12)
+        self.ax[1].set_xticks(bin_edges)
+        self.ax[1].tick_params(axis='both', which='major', labelsize=10)
+        self.ax[1].set_xlim(self.histogram_range_m)
+        self.ax[1].xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{x:.2f}'))
+        self.ax[1].grid()
+
+        # Plot the Probabilities
+        scatter = self.ax[2].scatter(
+            [x[0] for x in self.probabilties_coords],
+            [x[1] for x in self.probabilties_coords],
+            s=64,
+            c=self.probabilities,
+            cmap='RdYlGn',
+            marker='s',
+        )
+
+        if self.cbar_flag:
+            cbar = plt.colorbar(scatter, ax=self.ax[2])
+            cbar.set_label('Probability')
+            cbar.set_ticks([]) 
+            self.cbar_flag = False
+            # Get the colorbar axis
+            cbar_ax = cbar.ax
+            
+            # Add custom labels at the bottom and top of the colorbar
+            cbar_ax.text(1.25, 0, 'Least\nProbable\nLocation', ha='left', va='bottom', transform=cbar_ax.transAxes)
+            cbar_ax.text(1.25, 1, 'Most\nProbable\nLocation', ha='left', va='top', transform=cbar_ax.transAxes)
+            
+
+        self.ax[2].set_xlabel("X [m]",fontsize=12)
+        self.ax[2].set_ylabel("Y [m]",fontsize=12)
+        
+        plt.draw()
+        plt.pause(0.00001)
 
 
 def main(args=None):
