@@ -298,7 +298,7 @@ class HistogramFilter(Node):
             [x[1] for x in self.probabilties_coords],
             s=64,
             c=self.probabilities,
-            cmap='RdYlGn',
+            cmap='gnuplot2_r',
             marker='s',
         )
 
