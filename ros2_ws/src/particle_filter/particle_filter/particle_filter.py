@@ -30,7 +30,7 @@ class ParticleFilter(Node):
         self.declare_parameter("y_range_m", [-2.25, 2.25])
         self.declare_parameter("theta_range_deg", [0, 0])
         self.declare_parameter("odom_topic", "/odom_vel")
-        self.declare_parameter("odom_std", [0.0, 0.0])
+        self.declare_parameter("odom_std", [0.0, 360.0])
 
         # Get parameters
         self.num_particles = self.get_parameter("num_particles").get_parameter_value().integer_value
@@ -97,10 +97,7 @@ class ParticleFilter(Node):
         """
 
         pose_std, angle_std = std
-
-        delta_x = abs(pose_msg.pose.position.x - self.previous_odom_pose.pose.position.x)
-        delta_y = abs(pose_msg.pose.position.y - self.previous_odom_pose.pose.position.y)
-
+        
         _, _, previous_yaw = tf_transformations.euler_from_quaternion([
             self.previous_odom_pose.pose.orientation.x,
             self.previous_odom_pose.pose.orientation.y,
@@ -108,7 +105,7 @@ class ParticleFilter(Node):
             self.previous_odom_pose.pose.orientation.w
         ])
 
-        _, _, current_yaw= tf_transformations.euler_from_quaternion([
+        _, _, current_yaw = tf_transformations.euler_from_quaternion([
             pose_msg.pose.orientation.x,
             pose_msg.pose.orientation.y,
             pose_msg.pose.orientation.z,
@@ -116,14 +113,20 @@ class ParticleFilter(Node):
         ])
 
         delta_theta = current_yaw - previous_yaw
+        delta_theta = np.arctan2(np.sin(delta_theta), np.cos(delta_theta)) 
+
+        delta_x = pose_msg.pose.position.x - self.previous_odom_pose.pose.position.x
+        delta_y = pose_msg.pose.position.y - self.previous_odom_pose.pose.position.y
+        distance_travelled = np.linalg.norm([delta_x, delta_y])
 
         for particle in particles:
-            particle.x += delta_x * np.cos(particle.theta) + np.random.normal(0, pose_std)
-            particle.y += delta_y * np.sin(particle.theta) + np.random.normal(0, pose_std)
+            particle.x += distance_travelled * np.cos(particle.theta) + np.random.normal(0, pose_std)
+            particle.y += distance_travelled * np.sin(particle.theta) + np.random.normal(0, pose_std)
             particle.theta += delta_theta + np.random.normal(0, angle_std)
             particle.theta = np.arctan2(np.sin(particle.theta), np.cos(particle.theta))
 
         self.previous_odom_pose = pose_msg
+
 
     def particles_to_poses(self, particles: list) -> PoseArray:
         """
@@ -194,6 +197,7 @@ class ParticleFilter(Node):
                 self.get_logger().info(f"odom_topic changed to: {changed_parameter.value.string_value}")
                 self.odom_topic = changed_parameter.value.string_value
                 self.destroy_subscription(self.odom_subscription)
+                self.previous_odom_pose_initialized = False
                 self.odom_subscription = self.create_subscription(PoseStamped, self.odom_topic, self.odom_callback, 10)
             elif changed_parameter.name == "odom_std":
                 self.get_logger().info(f"odom_std changed to: {changed_parameter.value.double_array_value}")
