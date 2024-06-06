@@ -1,0 +1,8 @@
+/particle_filter:
+  ros__parameters:
+    num_particles: 100
+    x_range_m: [-2.25, 2.25]
+    y_range_m: [-2.25, 2.25]
+    theta_range_deg: [0, 360]
+    odom_topic: '/odom_vel'
+    odom_std: [0.0, 0.0]
