@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 
+import os
+import pickle
 
 import numpy as np
 import rclpy
 import tf_transformations
+from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Pose, PoseArray, PoseStamped
 from particle_filter.particle import Particle
 #from particle import Particle # for debugging
@@ -31,6 +34,7 @@ class ParticleFilter(Node):
         self.declare_parameter("theta_range_deg", [0, 0])
         self.declare_parameter("odom_topic", "/odom_vel")
         self.declare_parameter("odom_std", [0.0, 360.0])
+        self.declare_parameter('map_pkl_file', 'turtlebot3_dqn_stage4_grid_0.25_5_5.pkl')
 
         # Get parameters
         self.num_particles = self.get_parameter("num_particles").get_parameter_value().integer_value
@@ -39,6 +43,7 @@ class ParticleFilter(Node):
         self.theta_range_deg = tuple(self.get_parameter("theta_range_deg").get_parameter_value().integer_array_value)
         self.odom_topic = self.get_parameter("odom_topic").get_parameter_value().string_value
         self.odom_std = tuple(self.get_parameter("odom_std").get_parameter_value().double_array_value)
+        self.map_pkl_file = self.get_parameter('map_pkl_file').get_parameter_value().string_value
 
         # Log the parameters
         self.get_logger().info(f"num_particles: {self.num_particles}")
@@ -47,6 +52,7 @@ class ParticleFilter(Node):
         self.get_logger().info(f"theta_range_deg: {self.theta_range_deg}")
         self.get_logger().info(f"odom_topic: {self.odom_topic}")
         self.get_logger().info(f"odom_std: {self.odom_std}")
+        self.get_logger().info(f"map_pkl_file: {self.map_pkl_file}")
 
         # Create /parameter_events and selected odom topic subscription
         self.event_subscription = self.create_subscription(ParameterEvent, '/parameter_events', self.parameter_event_callback, 10)
@@ -56,6 +62,10 @@ class ParticleFilter(Node):
         self.particles_poses_publisher = self.create_publisher(PoseArray, "/particles_poses", 10)
         self.timer_particles_poses = self.create_timer(1 / 30, self.particles_poses_callback)
 
+        # Create /reference_points_poses publisher with a 1Hz timer
+        self.reference_points_poses_publisher = self.create_publisher(PoseArray, "/reference_points_poses", 10)
+        self.timer_reference_points_poses = self.create_timer(1, self.reference_points_poses_callback)
+
         # Create particles
         self.particles = self.initialize_particles(self.num_particles, self.x_range_m, self.y_range_m, self.theta_range_deg)
         self.particles_poses = self.particles_to_poses(self.particles)
@@ -63,6 +73,24 @@ class ParticleFilter(Node):
         # Initialize the previous odometry pose
         self.previous_odom_pose = PoseStamped()
         self.previous_odom_pose_initialized = False
+
+        # Reference points
+        self.reference_points = self.load_refernece_points()
+    
+    def load_refernece_points(self):
+        """
+        Loads scan data from a pickle file.
+        """
+
+        scan_data_path = os.path.join(
+            get_package_share_directory("utils"),
+            "maps_data",
+            self.map_pkl_file,
+        )
+
+        with open(scan_data_path, "rb") as file:
+            reference_points = pickle.load(file)
+            return reference_points
 
     def initialize_particles(self, num_particles: int, x_range: tuple, y_range: tuple, theta_range: tuple) -> list:
         """
@@ -127,7 +155,6 @@ class ParticleFilter(Node):
 
         self.previous_odom_pose = pose_msg
 
-
     def particles_to_poses(self, particles: list) -> PoseArray:
         """
         Converts the particles to PoseArray.
@@ -152,6 +179,25 @@ class ParticleFilter(Node):
             pose.orientation.w = quaternion[3]
             poses.poses.append(pose)
         return poses
+    
+    def reference_points_to_poses(self, reference_points: list) -> PoseArray:
+
+        poses = PoseArray()
+        poses.header.frame_id = "odom"
+
+        reference_points_positions = [point.position for point in reference_points]
+
+        for point in reference_points_positions:
+            pose = Pose()
+            pose.position.x = point[0]
+            pose.position.y = point[1]
+            quaternion = tf_transformations.quaternion_from_euler(0, 0, np.deg2rad(point[2]))
+            pose.orientation.x = quaternion[0]
+            pose.orientation.y = quaternion[1]
+            pose.orientation.z = quaternion[2]
+            pose.orientation.w = quaternion[3]
+            poses.poses.append(pose)
+        return poses
 
     def particles_poses_callback(self) -> None:
         """
@@ -159,6 +205,13 @@ class ParticleFilter(Node):
         """
         self.particles_poses = self.particles_to_poses(self.particles)
         self.particles_poses_publisher.publish(self.particles_poses)
+
+    def reference_points_poses_callback(self) -> None:
+        """
+        Publishes the reference points poses.
+        """
+        self.reference_points_poses = self.reference_points_to_poses(self.reference_points)
+        self.reference_points_poses_publisher.publish(self.reference_points_poses)
 
     def odom_callback(self, msg: PoseStamped) -> None:
         """
