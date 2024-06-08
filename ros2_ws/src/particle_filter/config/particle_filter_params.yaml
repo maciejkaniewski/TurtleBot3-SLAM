@@ -6,3 +6,4 @@
     theta_range_deg: [0, 360]
     odom_topic: '/odom_vel'
     odom_std: [0.0, 0.0]
+    map_pkl_file: 'turtlebot3_dqn_stage4_grid_0.25_5_5.pkl'
