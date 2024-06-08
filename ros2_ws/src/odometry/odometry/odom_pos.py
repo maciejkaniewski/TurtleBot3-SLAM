@@ -20,7 +20,7 @@ class OdomPosition(Node):
 
     def __init__(self):
         """
-        Initializes an instance of the OdomVelocity class.
+        Initializes an instance of the OdomPosition class.
         """
 
         super().__init__("odom_pos")
@@ -49,7 +49,7 @@ class OdomPosition(Node):
         self.odom_subscription = self.create_subscription(Odometry, "/odom", self.odom_callback, 10)
         self.joint_states_subscription = self.create_subscription(JointState, "/joint_states", self.joint_states_callback, 10)
         
-        # Create /odom_vel publisher with a 30 Hz timer
+        # Create /odom_pos publisher with a 30 Hz timer
         self.odom_pos_publisher = self.create_publisher(PoseStamped, "/odom_pos", 10)
         self.timer_odom_pos = self.create_timer(1 / 30, self.odom_pos_callback)
 
@@ -80,8 +80,8 @@ class OdomPosition(Node):
             d_theta = (d_right - d_left) / self.distance_between_wheels_m
 
             # Update the pose
-            self.robot_x_m += d * np.cos(self.robot_theta_rad + d_theta / 2)
-            self.robot_y_m += d * np.sin(self.robot_theta_rad + d_theta / 2)
+            self.robot_x_m += d * np.cos(self.robot_theta_rad)
+            self.robot_y_m += d * np.sin(self.robot_theta_rad)
             self.robot_theta_rad += d_theta
 
             # Normalize the angle to the range [-pi, pi]
