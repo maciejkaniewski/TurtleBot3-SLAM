@@ -23,6 +23,10 @@ def generate_launch_description():
         get_package_share_directory("particle_filter"), "config", "particle_filter_params.yaml"
     )
 
+    config_histogram_filter = os.path.join(
+        get_package_share_directory("histogram_filter"), "config", "histogram_filter_params.yaml"
+    )
+
     rviz_node = Node(
         package="rviz2",
         executable="rviz2",
@@ -55,10 +59,19 @@ def generate_launch_description():
         output="screen",
     )
 
+    histogram_filter_node = Node(
+        package="histogram_filter",
+        name="histogram_filter",
+        executable="histogram_filter",
+        parameters=[config_histogram_filter],
+        output="screen",
+    )
+
     ld = LaunchDescription()
     ld.add_action(odom_vel_node)
     ld.add_action(odom_pos_node)
     ld.add_action(rviz_node)
     ld.add_action(particle_filter_node)
+    ld.add_action(histogram_filter_node)
 
     return ld
