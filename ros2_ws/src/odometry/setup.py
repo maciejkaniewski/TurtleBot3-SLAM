@@ -27,6 +27,7 @@ setup(
         "console_scripts": [
             "odom_vel = odometry.odom_vel:main",
             "odom_pos = odometry.odom_pos:main",
+            "odom_errors = odometry.odom_errors:main",
         ],
     },
 )
