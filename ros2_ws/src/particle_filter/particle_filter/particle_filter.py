@@ -2,16 +2,20 @@
 
 import os
 import pickle
+import time
 
 import numpy as np
 import rclpy
 import tf_transformations
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Pose, PoseArray, PoseStamped
+from nav_msgs.msg import OccupancyGrid
 from particle_filter.particle import Particle
 #from particle import Particle # for debugging
 from rcl_interfaces.msg import ParameterEvent
 from rclpy.node import Node
+from std_msgs.msg import Header
+from utils.map_loader import MapLoader
 
 
 class ParticleFilter(Node):
@@ -34,7 +38,10 @@ class ParticleFilter(Node):
         self.declare_parameter("theta_range_deg", [0, 0])
         self.declare_parameter("odom_topic", "/odom_vel")
         self.declare_parameter("odom_std", [0.0, 360.0])
-        self.declare_parameter('map_pkl_file', 'turtlebot3_dqn_stage4_grid_0.25_5_5.pkl')
+        self.declare_parameter('map_pkl_file', 'turtlebot3_dqn_stage4_grid_0.25_3_3.pkl')
+        self.declare_parameter('map_pgm_file', 'turtlebot3_dqn_stage4.pgm')
+        self.declare_parameter('map_yaml_file', 'turtlebot3_dqn_stage4.yaml')
+        
 
         # Get parameters
         self.num_particles = self.get_parameter("num_particles").get_parameter_value().integer_value
@@ -44,6 +51,8 @@ class ParticleFilter(Node):
         self.odom_topic = self.get_parameter("odom_topic").get_parameter_value().string_value
         self.odom_std = tuple(self.get_parameter("odom_std").get_parameter_value().double_array_value)
         self.map_pkl_file = self.get_parameter('map_pkl_file').get_parameter_value().string_value
+        self.map_pgm_file = self.get_parameter('map_pgm_file').get_parameter_value().string_value
+        self.map_yaml_file = self.get_parameter('map_yaml_file').get_parameter_value().string_value
 
         # Log the parameters
         self.get_logger().info(f"num_particles: {self.num_particles}")
@@ -53,9 +62,13 @@ class ParticleFilter(Node):
         self.get_logger().info(f"odom_topic: {self.odom_topic}")
         self.get_logger().info(f"odom_std: {self.odom_std}")
         self.get_logger().info(f"map_pkl_file: {self.map_pkl_file}")
+        self.get_logger().info(f"map_pgm_file: {self.map_pgm_file}")
+        self.get_logger().info(f"map_yaml_file: {self.map_yaml_file}")
+        
 
         # Create /parameter_events and selected odom topic subscription
         self.event_subscription = self.create_subscription(ParameterEvent, '/parameter_events', self.parameter_event_callback, 10)
+        self.hfilter_pose_subscription = self.create_subscription(PoseStamped, '/hfilter_pose', self.hfilter_pose_callback, 10)
         self.odom_subscription = self.create_subscription(PoseStamped, self.odom_topic, self.odom_callback, 10)
 
         # Create /particles_poses publisher with a 30 Hz timer
@@ -65,6 +78,12 @@ class ParticleFilter(Node):
         # Create /reference_points_poses publisher with a 1Hz timer
         self.reference_points_poses_publisher = self.create_publisher(PoseArray, "/reference_points_poses", 10)
         self.timer_reference_points_poses = self.create_timer(1, self.reference_points_poses_callback)
+
+        # Create /pgm_map publisher for visualization
+        self.pgm_map_publisher = self.create_publisher(OccupancyGrid, "/pgm_map", 10)
+        self.load_pgm_map()
+        self.publish_pgm_map()
+        self.destroy_publisher(self.pgm_map_publisher)
 
         # Create particles
         self.particles = self.initialize_particles(self.num_particles, self.x_range_m, self.y_range_m, self.theta_range_deg)
@@ -76,6 +95,50 @@ class ParticleFilter(Node):
 
         # Reference points
         self.reference_points = self.load_refernece_points()
+    
+    def load_pgm_map(self) -> None:
+        """
+        Loads the map from the specified PGM and YAML files.
+        """
+
+        world_pgm_path = os.path.join(
+            get_package_share_directory("utils"),
+            "maps_pgm",
+            self.map_pgm_file
+        )
+
+        world_yaml_path = os.path.join(
+            get_package_share_directory("utils"),
+            "maps_yaml",
+            self.map_yaml_file
+        )
+
+        self.pgm_map = MapLoader(world_yaml_path, world_pgm_path)
+
+    def publish_pgm_map(self) -> None:
+        """
+        Publishes the loaded map as an OccupancyGrid message.
+        """
+
+        time.sleep(2)
+        occupancy_grid_msg = OccupancyGrid()
+        inverted_img = 255 - self.pgm_map.img
+        scaled_img = np.flip((inverted_img * (100.0 / 255.0)).astype(np.int8), 0)
+        self.map_data = scaled_img.ravel()
+
+        occupancy_grid_msg.header = Header(
+            stamp=self.get_clock().now().to_msg(), frame_id="odom"
+        )
+        occupancy_grid_msg.info.width = self.pgm_map.width
+        occupancy_grid_msg.info.height = self.pgm_map.height
+        occupancy_grid_msg.info.resolution = self.pgm_map.resolution
+        occupancy_grid_msg.info.origin = Pose()
+        occupancy_grid_msg.info.origin.position.x = self.pgm_map.origin[0]
+        occupancy_grid_msg.info.origin.position.y = self.pgm_map.origin[1]
+        occupancy_grid_msg.info.origin.position.z = 0.0
+        occupancy_grid_msg.info.origin.orientation.w = 1.0
+        occupancy_grid_msg.data = self.map_data.tolist()
+        self.pgm_map_publisher.publish(occupancy_grid_msg)
     
     def load_refernece_points(self):
         """
@@ -223,7 +286,23 @@ class ParticleFilter(Node):
             self.previous_odom_pose_initialized = True
 
         self.predict_particles(self.particles, msg, self.odom_std)
-    
+
+    def hfilter_pose_callback(self, msg: PoseStamped) -> None:
+        """
+        Callback function for the hfilter pose publisher.
+        """
+
+        # Log revieved pf filter pose
+        self.get_logger().info(f"(X: {msg.pose.position.x:.2f} [m], Y: {msg.pose.position.y:.2f} [m], θ: {msg.pose.position.z:.2f} [°])")
+        # having the pos x,y, and theta i want to get the measuremnt from reference points with this coords
+        
+        threshold = 0.1
+
+        for point in self.reference_points:
+            if abs(point.position[0] - msg.pose.position.x) < threshold and abs(point.position[1] - msg.pose.position.y) < threshold:
+                self.get_logger().info(f"Reference point found: {point.position}")
+                break
+
     def parameter_event_callback(self, event: ParameterEvent) -> None:
         """
         Callback function for handling parameter events.
