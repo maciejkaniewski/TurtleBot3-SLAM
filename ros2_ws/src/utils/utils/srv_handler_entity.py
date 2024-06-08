@@ -63,7 +63,7 @@ class SrvHandlerEntity:
         self.wait_for_service(self.set_entity_client, "/gazebo/set_entity_state")
         request = SetEntityState.Request()
         request.state.name = self.entity_name
-        request.state.pose.position = Point(x=x_set, y=y_set, z=0.1)
+        request.state.pose.position = Point(x=x_set, y=y_set, z=0.01)
         quaternion = tf_transformations.quaternion_from_euler(0, 0, np.deg2rad(theta_set))
         request.state.pose.orientation = Quaternion(x=quaternion[0], y=quaternion[1], z=quaternion[2], w=quaternion[3])
 
