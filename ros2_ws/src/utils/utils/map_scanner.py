@@ -14,6 +14,7 @@ from utils.scan_data import ScanData
 from utils.srv_handler_entity import SrvHandlerEntity
 from utils.srv_handler_physics import SrvHandlerPhysics
 
+# TODO: Add x-range and y-range parameters
 
 class MapScanner(Node):
     """
@@ -179,13 +180,14 @@ class MapScanner(Node):
         for y in np.arange(y_min, y_max + step, step):
             for x in np.arange(x_min, x_max + step, step):
                 if not self.is_position_near_obstacle(x, y):
-                    #self.pause_physics()
+                    self.pause_physics()
                     self.set_entity_state(x, y, 90)
-                    #self.unpause_physics()
-                    time.sleep(1)
+                    self.unpause_physics()
+                    time.sleep(2)
                     self.new_scan_received = False
                     while not self.new_scan_received:
                         rclpy.spin_once(self)
+                    self.pause_physics()
 
         self.get_logger().info(f"Saving scan data at {self.scan_data_path}")
         self.save_scan_data(self.scan_data_path)
