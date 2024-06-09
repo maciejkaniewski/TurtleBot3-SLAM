@@ -4,6 +4,7 @@ import os
 import pickle
 import time
 
+import matplotlib.pyplot as plt
 import numpy as np
 import rclpy
 import tf_transformations
@@ -14,6 +15,7 @@ from particle_filter.particle import Particle
 #from particle import Particle # for debugging
 from rcl_interfaces.msg import ParameterEvent
 from rclpy.node import Node
+from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Header
 from utils.map_loader import MapLoader
 
@@ -41,8 +43,8 @@ class ParticleFilter(Node):
         self.declare_parameter('map_pkl_file', 'turtlebot3_dqn_stage4_grid_0.25_3_3.pkl')
         self.declare_parameter('map_pgm_file', 'turtlebot3_dqn_stage4.pgm')
         self.declare_parameter('map_yaml_file', 'turtlebot3_dqn_stage4.yaml')
+        self.declare_parameter('plot_enabled', True)
         
-
         # Get parameters
         self.num_particles = self.get_parameter("num_particles").get_parameter_value().integer_value
         self.x_range_m = tuple(self.get_parameter("x_range_m").get_parameter_value().double_array_value)
@@ -53,6 +55,7 @@ class ParticleFilter(Node):
         self.map_pkl_file = self.get_parameter('map_pkl_file').get_parameter_value().string_value
         self.map_pgm_file = self.get_parameter('map_pgm_file').get_parameter_value().string_value
         self.map_yaml_file = self.get_parameter('map_yaml_file').get_parameter_value().string_value
+        self.plot_enabled = self.get_parameter('plot_enabled').get_parameter_value().bool_value
 
         # Log the parameters
         self.get_logger().info(f"num_particles: {self.num_particles}")
@@ -64,12 +67,13 @@ class ParticleFilter(Node):
         self.get_logger().info(f"map_pkl_file: {self.map_pkl_file}")
         self.get_logger().info(f"map_pgm_file: {self.map_pgm_file}")
         self.get_logger().info(f"map_yaml_file: {self.map_yaml_file}")
+        self.get_logger().info(f"plot_enabled: {self.plot_enabled}")
         
-
         # Create /parameter_events and selected odom topic subscription
         self.event_subscription = self.create_subscription(ParameterEvent, '/parameter_events', self.parameter_event_callback, 10)
         self.hfilter_pose_subscription = self.create_subscription(PoseStamped, '/hfilter_pose', self.hfilter_pose_callback, 10)
         self.odom_subscription = self.create_subscription(PoseStamped, self.odom_topic, self.odom_callback, 10)
+        self.scan_subscription = self.create_subscription(LaserScan, "/scan", self.scan_callback, 10)
 
         # Create /particles_poses publisher with a 30 Hz timer
         self.particles_poses_publisher = self.create_publisher(PoseArray, "/particles_poses", 10)
@@ -95,6 +99,19 @@ class ParticleFilter(Node):
 
         # Reference points
         self.reference_points = self.load_refernece_points()
+        self.closest_refernece_point = None
+
+        # Scan data
+        self.current_scan_data = None
+        self.aligned_current_scan_data = None
+        self.orientation_difference = None
+
+        # Plotting
+        if self.plot_enabled:
+            self.fig, self.ax = plt.subplots(1, 1, figsize=(6, 6))
+            self.fig.canvas.manager.set_window_title('Particle Filter')
+            self.plot_timer = self.create_timer(1, self.plot_callback)
+            self.cbar_flag = True
     
     def load_pgm_map(self) -> None:
         """
@@ -261,6 +278,18 @@ class ParticleFilter(Node):
             pose.orientation.w = quaternion[3]
             poses.poses.append(pose)
         return poses
+    
+    def get_closest_reference_point(self, msg: PoseStamped, threshold: float) -> None:
+        """
+        Finds the reference point based on the given pose.
+
+        Args:
+            msg (PoseStamped): The pose message.
+            threshold (float): The threshold for matching the reference point.
+        """
+        for point in self.reference_points:
+            if abs(point.position[0] - msg.pose.position.x) < threshold and abs(point.position[1] - msg.pose.position.y) < threshold:
+                return point
 
     def particles_poses_callback(self) -> None:
         """
@@ -292,16 +321,23 @@ class ParticleFilter(Node):
         Callback function for the hfilter pose publisher.
         """
 
-        # Log revieved pf filter pose
-        self.get_logger().info(f"(X: {msg.pose.position.x:.2f} [m], Y: {msg.pose.position.y:.2f} [m], θ: {msg.pose.position.z:.2f} [°])")
-        # having the pos x,y, and theta i want to get the measuremnt from reference points with this coords
-        
-        threshold = 0.1
+        orientation_q = msg.pose.orientation
+        quaternion = [orientation_q.x, orientation_q.y, orientation_q.z, orientation_q.w]
+        _, _, yaw = tf_transformations.euler_from_quaternion(quaternion)
+        self.orientation_difference = np.rad2deg(yaw)
+        self.closest_refernece_point = self.get_closest_reference_point(msg, threshold=0.05)
 
-        for point in self.reference_points:
-            if abs(point.position[0] - msg.pose.position.x) < threshold and abs(point.position[1] - msg.pose.position.y) < threshold:
-                self.get_logger().info(f"Reference point found: {point.position}")
-                break
+    def scan_callback(self, msg: LaserScan) -> None:
+        """
+        Callback function for handling laser scan messages.
+
+        Args:
+            msg (LaserScan): The incoming laser scan message.
+        """
+
+        self.current_scan_data = msg.ranges
+        # Aligin the current scan data with the closest reference point
+        self.aligned_current_scan_data = np.roll(self.current_scan_data, int(self.orientation_difference - self.closest_refernece_point.position[2]))
 
     def parameter_event_callback(self, event: ParameterEvent) -> None:
         """
@@ -334,6 +370,64 @@ class ParticleFilter(Node):
             elif changed_parameter.name == "odom_std":
                 self.get_logger().info(f"odom_std changed to: {changed_parameter.value.double_array_value}")
                 self.odom_std = tuple(changed_parameter.value.double_array_value)
+
+    def plot_callback(self) -> None:
+        """
+        Callback function for plotting.
+
+        """
+
+        self.ax.cla()
+
+        # # Plot Current Scan Data
+        # self.ax.plot(
+        #     self.current_scan_data,
+        #     label="Current LaserScan Data",
+        #     color="#16FF00",
+        #     linewidth=2,
+        # )
+        # self.ax.fill_between(
+        #     range(len(self.current_scan_data)),
+        #     self.current_scan_data,
+        #     color="#16FF00",
+        #     alpha=0.3
+        # )
+
+        self.ax.plot(
+            self.closest_refernece_point.measurements,
+            label="Closest LaserScan Data",
+            color="magenta",
+            linewidth=2,
+            linestyle='dashed',
+        )
+        self.ax.fill_between(
+            range(len(self.closest_refernece_point.measurements)),
+            self.closest_refernece_point.measurements,
+            color="magenta",
+            alpha=0.3
+        )
+
+        self.ax.plot(
+            self.aligned_current_scan_data,
+            label="Aligned LaserScan Data",
+            color="blue",
+            linewidth=2,
+            linestyle='dashed',
+        )
+        self.ax.fill_between(
+            range(len( self.aligned_current_scan_data)),
+            self.aligned_current_scan_data,
+            color="blue",
+            alpha=0.3
+        )
+
+        self.ax.set_xlabel("θ [°]", fontsize=12)
+        self.ax.set_ylabel("Distance [m]", fontsize=12)
+        self.ax.grid()
+        self.ax.legend()
+
+        plt.draw()
+        plt.pause(0.00001)
 
 def main(args=None):
     rclpy.init(args=args)
