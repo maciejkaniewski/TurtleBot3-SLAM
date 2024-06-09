@@ -165,6 +165,7 @@ class HistogramFilter(Node):
         # Adjust reference data to 0 degrees orientation by shifting the data
         # Assumed that the data was collected within 90 orientation, if not, adjust the shift value
         adjusted_ref_data = np.roll(ref_data, -90)
+        # TODO: Adjust the shift value based on the reference data
 
         # Replace 'inf' values with the maximum valid value from the reference data
         max_valid_value = np.nanmax(ref_data[~np.isinf(ref_data)])  # Maximum value among non-infinite values.
