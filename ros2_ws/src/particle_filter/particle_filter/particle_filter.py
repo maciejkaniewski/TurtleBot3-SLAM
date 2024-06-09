@@ -106,6 +106,19 @@ class ParticleFilter(Node):
         self.aligned_current_scan_data = None
         self.orientation_difference = None
 
+        # Distances to reference points
+        self.displacements_x = []
+        self.displacements_y = []
+        self.euclidean_distances = np.zeros(len(self.reference_points))
+        self.true_euclidean_distances = np.zeros(len(self.reference_points))
+
+        # Robot true position
+        self.robot_true_x_m = 0.0
+        self.robot_true_y_m = 0.0
+
+        # Timer for logging
+        self.timer_logger = self.create_timer(0.1, self.logger_callback)
+
         # Plotting
         if self.plot_enabled:
             self.fig, self.ax = plt.subplots(1, 1, figsize=(6, 6))
@@ -291,6 +304,40 @@ class ParticleFilter(Node):
             if abs(point.position[0] - msg.pose.position.x) < threshold and abs(point.position[1] - msg.pose.position.y) < threshold:
                 return point
 
+
+    def get_indices_around(self, reference_index, num_indices):
+        """
+        Returns a list of indices centered around a reference index.
+        """
+
+        indices = []
+
+        for i in range(-num_indices // 2, num_indices // 2 + 1):
+            indices.append((reference_index + i) % (359 + 1))
+
+        return indices
+    
+    def calculate_scan_displacement(self, reference_scan, aligned_scan, axis='x', cone_angle=10):
+        """
+        Calculates the displacement between reference_scan and aligned_scan in the specified axis.
+        """
+
+        if axis == 'x':
+            angles = [90, 270]  # Angles for x-axis displacement
+        elif axis == 'y':
+            angles = [359, 180]   # Angles for y-axis displacement
+        else:
+            raise ValueError("Axis must be either 'x' or 'y'")
+
+        min_distances = []
+        for angle in angles:
+            indx = self.get_indices_around(angle, cone_angle)
+            distances = [np.abs(reference_scan[i] - aligned_scan[i]) for i in indx]
+            min_distances.append(min(distances))
+
+        avg_dist = sum(min_distances) / len(min_distances)
+        return avg_dist
+
     def particles_poses_callback(self) -> None:
         """
         Publishes the particle poses.
@@ -315,6 +362,8 @@ class ParticleFilter(Node):
             self.previous_odom_pose_initialized = True
 
         self.predict_particles(self.particles, msg, self.odom_std)
+        self.robot_true_x_m = msg.pose.position.x
+        self.robot_true_y_m = msg.pose.position.y
 
     def hfilter_pose_callback(self, msg: PoseStamped) -> None:
         """
@@ -338,6 +387,24 @@ class ParticleFilter(Node):
         self.current_scan_data = msg.ranges
         # Aligin the current scan data with the closest reference point
         self.aligned_current_scan_data = np.roll(self.current_scan_data, int(self.orientation_difference - self.closest_refernece_point.position[2]))
+
+        self.displacements_x = []
+        self.displacements_y = []
+        self.euclidean_distances = []
+        self.true_euclidean_distances = []
+
+        #Calulate displcements for every refenece point
+        for point in self.reference_points:
+            x_displacement = self.calculate_scan_displacement(point.measurements, self.aligned_current_scan_data, axis='x')
+            y_displacement = self.calculate_scan_displacement(point.measurements, self.aligned_current_scan_data, axis='y')
+            self.displacements_x.append(x_displacement)
+            self.displacements_y.append(y_displacement)
+
+            euclidean_distance = np.linalg.norm([x_displacement, y_displacement])
+            self.euclidean_distances.append(euclidean_distance)
+
+            euclidean_distance_true = np.linalg.norm([self.robot_true_x_m - point.position[0], self.robot_true_y_m - point.position[1]])
+            self.true_euclidean_distances.append(euclidean_distance_true)
 
     def parameter_event_callback(self, event: ParameterEvent) -> None:
         """
@@ -428,6 +495,21 @@ class ParticleFilter(Node):
 
         plt.draw()
         plt.pause(0.00001)
+
+    def logger_callback(self) -> None:
+        """
+        Callback function for logging information.
+        """
+
+        for i, point in enumerate(self.reference_points):
+            self.get_logger().info(
+                f"Reference Point {i}: ({point.position[0]:>5.2f}, {point.position[1]:>5.2f}, {point.position[2]:>5.2f}) "
+                f"Euclidean Distance: {self.euclidean_distances[i]:.2f}, True Euclidean Distance: {self.true_euclidean_distances[i]:.2f}"
+            )
+        time.sleep(0.25)
+        clear_screen = "\033[2J\033[H"
+        self.get_logger().info(f"{clear_screen}")
+
 
 def main(args=None):
     rclpy.init(args=args)
