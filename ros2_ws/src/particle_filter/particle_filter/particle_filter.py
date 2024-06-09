@@ -7,6 +7,7 @@ import time
 import matplotlib.pyplot as plt
 import numpy as np
 import rclpy
+import scipy.stats
 import tf_transformations
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Pose, PoseArray, PoseStamped
@@ -37,9 +38,10 @@ class ParticleFilter(Node):
         self.declare_parameter("num_particles", 10)
         self.declare_parameter("x_range_m", [-2.25, 2.25])
         self.declare_parameter("y_range_m", [-2.25, 2.25])
-        self.declare_parameter("theta_range_deg", [0, 0])
+        self.declare_parameter("theta_range_deg", [0, 360])
         self.declare_parameter("odom_topic", "/odom_vel")
-        self.declare_parameter("odom_std", [0.0, 360.0])
+        self.declare_parameter("odom_std", [0.015,0.005 ])
+        self.declare_parameter("update_noise", 0.125)
         self.declare_parameter('map_pkl_file', 'turtlebot3_dqn_stage4_grid_0.25_3_3.pkl')
         self.declare_parameter('map_pgm_file', 'turtlebot3_dqn_stage4.pgm')
         self.declare_parameter('map_yaml_file', 'turtlebot3_dqn_stage4.yaml')
@@ -52,6 +54,7 @@ class ParticleFilter(Node):
         self.theta_range_deg = tuple(self.get_parameter("theta_range_deg").get_parameter_value().integer_array_value)
         self.odom_topic = self.get_parameter("odom_topic").get_parameter_value().string_value
         self.odom_std = tuple(self.get_parameter("odom_std").get_parameter_value().double_array_value)
+        self.update_noise = self.get_parameter("update_noise").get_parameter_value().double_value
         self.map_pkl_file = self.get_parameter('map_pkl_file').get_parameter_value().string_value
         self.map_pgm_file = self.get_parameter('map_pgm_file').get_parameter_value().string_value
         self.map_yaml_file = self.get_parameter('map_yaml_file').get_parameter_value().string_value
@@ -64,6 +67,7 @@ class ParticleFilter(Node):
         self.get_logger().info(f"theta_range_deg: {self.theta_range_deg}")
         self.get_logger().info(f"odom_topic: {self.odom_topic}")
         self.get_logger().info(f"odom_std: {self.odom_std}")
+        self.get_logger().info(f"update_noise: {self.update_noise}")
         self.get_logger().info(f"map_pkl_file: {self.map_pkl_file}")
         self.get_logger().info(f"map_pgm_file: {self.map_pgm_file}")
         self.get_logger().info(f"map_yaml_file: {self.map_yaml_file}")
@@ -82,6 +86,10 @@ class ParticleFilter(Node):
         # Create /reference_points_poses publisher with a 1Hz timer
         self.reference_points_poses_publisher = self.create_publisher(PoseArray, "/reference_points_poses", 10)
         self.timer_reference_points_poses = self.create_timer(1, self.reference_points_poses_callback)
+
+        # Create /particle_pose publisher with a 30 Hz timer
+        self.pfliter_pose_publisher = self.create_publisher(PoseStamped, "/pfilter_pose", 10)
+        self.pfilter_pose = self.create_timer(1 / 30, self.pfilter_pose_callback)
 
         # Create /pgm_map publisher for visualization
         self.pgm_map_publisher = self.create_publisher(OccupancyGrid, "/pgm_map", 10)
@@ -104,7 +112,7 @@ class ParticleFilter(Node):
         # Scan data
         self.current_scan_data = None
         self.aligned_current_scan_data = None
-        self.orientation_difference = None
+        self.orientation_difference = 0
 
         # Distances to reference points
         self.displacements_x = []
@@ -115,6 +123,10 @@ class ParticleFilter(Node):
         # Robot true position
         self.robot_true_x_m = 0.0
         self.robot_true_y_m = 0.0
+
+        # Robot estimated position
+        self.robot_x_m = 0.0
+        self.robot_y_m = 0.0
 
         # Timer for logging
         self.timer_logger = self.create_timer(0.1, self.logger_callback)
@@ -207,7 +219,7 @@ class ParticleFilter(Node):
             particles.append(Particle(x, y, theta, 1.0 / num_particles))
         return particles
     
-    def predict_particles(self, particles: list, pose_msg: PoseStamped, std=(0.0, 0.0)) -> list:
+    def predict_particles(self, particles: list, pose_msg: PoseStamped, std=(0.015, 0.005)) -> list:
         """
         Predicts the particles based on the odometry data.
 
@@ -247,6 +259,95 @@ class ParticleFilter(Node):
             particle.theta = np.arctan2(np.sin(particle.theta), np.cos(particle.theta))
 
         self.previous_odom_pose = pose_msg
+
+    def update_particles(self, particles, z, landmarks, R=0.05):
+        """
+        Update particles' weights based on measurement z, noise R, and landmarks.
+
+        Args:
+            particles (list of Particle): The particles to update.
+            z (np.array): Array of measurements.
+            R (float): Measurement noise.
+            landmarks (list of tuples): Positions of landmarks.
+        """
+
+        weights = np.array([particle.weight for particle in particles])
+        for i, landmark in enumerate(landmarks):
+            distances = np.array(
+                [
+                    np.linalg.norm([particle.x - landmark.position[0], particle.y - landmark.position[1]])
+                    for particle in particles
+                ]
+            )
+            weights *= scipy.stats.norm(distances, R).pdf(z[i])
+            # errors = np.abs(distances - z[i])
+        
+            # # Update weights using a Gaussian-like function
+            # weights *= np.exp(-0.5 * (errors / 0.5) ** 2)
+
+        weights += 1.0e-300  # avoid round-off to zero
+        weights /= np.sum(weights)  # normalize
+
+        # Assign updated weights back to particles
+        for i, particle in enumerate(particles):
+            particle.weight = weights[i]
+    
+    def neff(self, particles):
+        """
+        Calculate the effective number of particles (N_eff), based on their weights.
+
+        Args:
+            particles (list of Particle): The particles whose effective number is to be calculated.
+
+        Returns:
+            float: The effective number of particles.
+        """
+        weights = np.array([particle.weight for particle in particles])
+        return 1.0 / np.sum(np.square(weights))
+
+    def systematic_resample(self, particles):
+        """
+        Performs systematic resampling on a list of Particle objects, returning only the indexes.
+        """
+
+        N = len(particles)
+        weights = np.array([particle.weight for particle in particles])
+
+        positions = (np.random.random() + np.arange(N)) / N
+        indexes = np.zeros(N, dtype=int)
+        cumulative_sum = np.cumsum(weights)
+        i, j = 0, 0
+        while i < N:
+            if positions[i] < cumulative_sum[j]:
+                indexes[i] = j
+                i += 1
+            else:
+                j += 1
+
+        return indexes
+
+    def resample_from_index(self, particles, indexes):
+        """
+        Resample the list of particles according to the provided indexes, adjusting weights.
+        """
+
+        new_particles = [particles[index] for index in indexes]
+        resampled_particles = [
+            Particle(p.x, p.y, p.theta, 1.0 / len(indexes)) for p in new_particles
+        ]
+
+        return resampled_particles
+    
+    def estimate_particles(self, particles):
+        """
+        Estimates the mean and variance of the particle positions.
+        """
+
+        pos = np.array([[p._x, p._y] for p in particles])
+        weights = np.array([p._weight for p in particles])
+        mean = np.average(pos, weights=weights, axis=0)
+        var = np.average((pos - mean) ** 2, weights=weights, axis=0)
+        return mean, var
 
     def particles_to_poses(self, particles: list) -> PoseArray:
         """
@@ -304,7 +405,6 @@ class ParticleFilter(Node):
             if abs(point.position[0] - msg.pose.position.x) < threshold and abs(point.position[1] - msg.pose.position.y) < threshold:
                 return point
 
-
     def get_indices_around(self, reference_index, num_indices):
         """
         Returns a list of indices centered around a reference index.
@@ -351,6 +451,27 @@ class ParticleFilter(Node):
         """
         self.reference_points_poses = self.reference_points_to_poses(self.reference_points)
         self.reference_points_poses_publisher.publish(self.reference_points_poses)
+
+    def pfilter_pose_callback(self) -> None:
+        """
+        Callback function for the particle filter pose publisher.
+        """
+
+        pose_stamped = PoseStamped()
+        pose_stamped.header.stamp = self.get_clock().now().to_msg()
+        pose_stamped.header.frame_id = "odom"
+
+        pose = pose_stamped.pose
+        pose.position.x = self.robot_x_m
+        pose.position.y = self.robot_y_m
+
+        quaternion = tf_transformations.quaternion_from_euler(0, 0, np.deg2rad(self.orientation_difference))
+        pose.orientation.x = quaternion[0]
+        pose.orientation.y = quaternion[1]
+        pose.orientation.z = quaternion[2]
+        pose.orientation.w = quaternion[3]
+
+        self.pfliter_pose_publisher.publish(pose_stamped)
 
     def odom_callback(self, msg: PoseStamped) -> None:
         """
@@ -406,6 +527,20 @@ class ParticleFilter(Node):
             euclidean_distance_true = np.linalg.norm([self.robot_true_x_m - point.position[0], self.robot_true_y_m - point.position[1]])
             self.true_euclidean_distances.append(euclidean_distance_true)
 
+        self.update_particles(self.particles, self.euclidean_distances, self.reference_points, self.update_noise)
+        self.particles_poses = self.particles_to_poses(self.particles)
+        self.particles_poses_publisher.publish(self.particles_poses)
+        if self.neff(self.particles) < len(self.particles) / 2:
+            indexes = self.systematic_resample(self.particles)
+            self.particles = self.resample_from_index(self.particles, indexes)
+            assert np.allclose(
+                np.array([p.weight for p in self.particles]),
+                1 / len(self.particles),
+            )
+        mean, var = self.estimate_particles(self.particles)
+        self.robot_x_m = mean[0]
+        self.robot_y_m = mean[1]
+
     def parameter_event_callback(self, event: ParameterEvent) -> None:
         """
         Callback function for handling parameter events.
@@ -437,6 +572,9 @@ class ParticleFilter(Node):
             elif changed_parameter.name == "odom_std":
                 self.get_logger().info(f"odom_std changed to: {changed_parameter.value.double_array_value}")
                 self.odom_std = tuple(changed_parameter.value.double_array_value)
+            elif changed_parameter.name == "update_noise":
+                self.get_logger().info(f"update_noise changed to: {changed_parameter.value.double_value}")
+                self.update_noise = changed_parameter.value.double_value
 
     def plot_callback(self) -> None:
         """
@@ -501,14 +639,18 @@ class ParticleFilter(Node):
         Callback function for logging information.
         """
 
-        for i, point in enumerate(self.reference_points):
-            self.get_logger().info(
-                f"Reference Point {i}: ({point.position[0]:>5.2f}, {point.position[1]:>5.2f}, {point.position[2]:>5.2f}) "
-                f"Euclidean Distance: {self.euclidean_distances[i]:.2f}, True Euclidean Distance: {self.true_euclidean_distances[i]:.2f}"
-            )
-        time.sleep(0.25)
-        clear_screen = "\033[2J\033[H"
-        self.get_logger().info(f"{clear_screen}")
+        # for i, point in enumerate(self.reference_points):
+        #     self.get_logger().info(
+        #         f"Reference Point {i}: ({point.position[0]:>5.2f}, {point.position[1]:>5.2f}, {point.position[2]:>5.2f}) "
+        #         f"Euclidean Distance: {self.euclidean_distances[i]:.2f}, True Euclidean Distance: {self.true_euclidean_distances[i]:.2f}"
+        #     )
+
+        # # #log particles positions with theri weights
+        # # for i, particle in enumerate(self.particles):
+        # #     self.get_logger().info(f"Particle {i}: ({particle.x:.2f}, {particle.y:.2f}, {np.degrees(particle.theta):.2f}) Weight: {particle.weight:.2f}")
+        # time.sleep(0.25)
+        # clear_screen = "\033[2J\033[H"
+        # self.get_logger().info(f"{clear_screen}")
 
 
 def main(args=None):
