@@ -1,11 +1,15 @@
 /particle_filter:
   ros__parameters:
-    num_particles: 100
+    num_particles: 250
     x_range_m: [-2.25, 2.25]
     y_range_m: [-2.25, 2.25]
     theta_range_deg: [0, 360]
     odom_topic: '/odom_vel'
-    odom_std: [0.0, 0.0]
-    map_pkl_file: 'turtlebot3_dqn_stage4_0.1.pkl'
+    predict_noise: [0.015,0.005]
+    update_noise: 0.125
+    update_method: 'gaussian'
+    resampling_method: 'systematic'
+    map_pkl_file: 'turtlebot3_dqn_stage4_grid_0.25_3_3.pkl'
     map_pgm_file: 'turtlebot3_dqn_stage4.pgm'
     map_yaml_file: 'turtlebot3_dqn_stage4.yaml'
+    plot_enabled: False
