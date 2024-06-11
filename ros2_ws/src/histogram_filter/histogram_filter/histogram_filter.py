@@ -32,8 +32,9 @@ class HistogramFilter(Node):
         self.declare_parameter('histogram_bins', 15)
         self.declare_parameter('histogram_range_m', [0.12, 3.5])
         self.declare_parameter('histogram_comparison', 'manhattan')
-        self.declare_parameter('map_pkl_file', 'turtlebot3_dqn_stage4_0.05.pkl')
+        self.declare_parameter('map_pkl_file', 'turtlebot3_dqn_stage4_grid_0.25_3_3.pkl')
         self.declare_parameter('plot_enabled', True)
+        self.declare_parameter("odom_topic", "/odom_vel")
 
         # Get parameters
         self.histogram_bins = self.get_parameter('histogram_bins').get_parameter_value().integer_value
@@ -41,6 +42,7 @@ class HistogramFilter(Node):
         self.histogram_comparison = self.get_parameter('histogram_comparison').get_parameter_value().string_value
         self.map_pkl_file = self.get_parameter('map_pkl_file').get_parameter_value().string_value
         self.plot_enabled = self.get_parameter('plot_enabled').get_parameter_value().bool_value
+        self.odom_topic = self.get_parameter('odom_topic').get_parameter_value().string_value
 
         self.histogram_range_m = tuple(self.histogram_range_m)
 
@@ -50,10 +52,12 @@ class HistogramFilter(Node):
         self.get_logger().info(f"histogram_comparison: {self.histogram_comparison}")
         self.get_logger().info(f"map_pkl_file: {self.map_pkl_file}")
         self.get_logger().info(f"plot_enabled: {self.plot_enabled}")
+        self.get_logger().info(f"odom_topic: {self.odom_topic}")
 
         # Create /scan and /parameter_events subscriptions
         self.scan_subscription = self.create_subscription(LaserScan, "/scan", self.scan_callback, 10)
         self.event_subscription = self.create_subscription(ParameterEvent, '/parameter_events', self.parameter_event_callback, 10)
+        self.odom_subscription = self.create_subscription(PoseStamped, self.odom_topic, self.odom_callback, 10)
 
         # Create /histogram_pose publisher with a 5 Hz timer
         self.hfliter_pose_publisher = self.create_publisher(PoseStamped, "/hfilter_pose", 10)
@@ -70,6 +74,10 @@ class HistogramFilter(Node):
         self.robot_y_m = 0.0
         self.robot_theta_rad = 0.0
         self.robot_theta_deg = 0.0
+
+        # Robot velocity/position position
+        self.robot_x_m_o = 0.0
+        self.robot_y_m_o = 0.0
 
         # Probabilities for the Histogram Filter
         self.probabilities = []
@@ -128,7 +136,7 @@ class HistogramFilter(Node):
         Localizes the robot based on the current histogram.
         """
 
-        estimated_x, estimated_y, index = None, None, None
+        estimated_x, estimated_y, index = 0, 0, 0
 
         self.probabilities = []
         self.probabilties_coords = []
@@ -152,7 +160,25 @@ class HistogramFilter(Node):
         index = np.argmax(self.probabilities)
         self.closest_scan_data = self.scan_data[index]
         estimated_x, estimated_y, _ = self.probabilties_coords[index]
-        
+
+        # Create a list of tuples with each probability and its corresponding coordinates
+        probabilities_with_coords_and_scans = list(zip(self.probabilities, self.scan_data))
+
+        # Sort the list of tuples by the probabilities in descending order
+        sorted_probabilities_with_coords = sorted(probabilities_with_coords_and_scans, key=lambda x: x[0], reverse=True)
+        dsitance_list = []
+
+        # for probability, scan in sorted_probabilities_with_coords:
+        #     estimated_x = scan.position[0]
+        #     estimated_y = scan.position[1]
+        #     self.closest_scan_data = scan
+
+        #     distance = np.linalg.norm([self.robot_x_m_o - estimated_x, self.robot_y_m_o - estimated_y])
+        #     # id dsitance is bigger than 0.5m look for next best scan
+        #     if distance > 0.25:
+        #         continue
+        #     else:
+        #         break
         return estimated_x, estimated_y
 
     def calculate_orientation(self, current_scan_data):
@@ -235,6 +261,13 @@ class HistogramFilter(Node):
                 self.get_logger().info(f"histogram_comparison changed to: {changed_parameter.value.string_value}")
                 self.histogram_comparison = changed_parameter.value.string_value
 
+    def odom_callback(self, msg: PoseStamped) -> None:
+        """
+        Callback function for the odometry velocity/position publisher.
+        """
+
+        self.robot_x_m_o = msg.pose.position.x
+        self.robot_y_m_o = msg.pose.position.y
 
     def plot_callback(self) -> None:
         """
@@ -302,6 +335,16 @@ class HistogramFilter(Node):
             cmap='gnuplot2_r',
             marker='s',
         )
+
+        # Create a list of tuples with each probability and its corresponding coordinates
+        probabilities_with_coords = list(zip(self.probabilities, self.probabilties_coords))
+
+        # Sort the list of tuples by the probabilities in descending order
+        sorted_probabilities_with_coords = sorted(probabilities_with_coords, key=lambda x: x[0], reverse=True)
+
+        # Iterate over the sorted list and annotate the points in the center
+        for rank, (probability, (x, y, _)) in enumerate(sorted_probabilities_with_coords, start=1):
+            self.ax[2].annotate(f"{rank}", (x, y), fontsize=8, color='red', ha='center', va='center')
 
         if self.cbar_flag:
             cbar = plt.colorbar(scatter, ax=self.ax[2])
