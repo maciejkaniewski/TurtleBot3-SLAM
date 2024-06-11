@@ -11,7 +11,7 @@ import scipy.stats
 import tf_transformations
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Pose, PoseArray, PoseStamped
-from nav_msgs.msg import OccupancyGrid
+from nav_msgs.msg import OccupancyGrid, Odometry
 from particle_filter.particle import Particle
 #from particle import Particle # for debugging
 from rcl_interfaces.msg import ParameterEvent
@@ -19,7 +19,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Header
 from utils.map_loader import MapLoader
-
+from utils.scan_data import ScanData
 
 class ParticleFilter(Node):
     """
@@ -40,8 +40,10 @@ class ParticleFilter(Node):
         self.declare_parameter("y_range_m", [-2.25, 2.25])
         self.declare_parameter("theta_range_deg", [0, 360])
         self.declare_parameter("odom_topic", "/odom_vel")
-        self.declare_parameter("odom_std", [0.015,0.005 ])
+        self.declare_parameter("predict_noise", [0.015,0.005 ])
         self.declare_parameter("update_noise", 0.125)
+        self.declare_parameter("update_method", 'gaussian')
+        self.declare_parameter("resampling_method", 'systematic')
         self.declare_parameter('map_pkl_file', 'turtlebot3_dqn_stage4_grid_0.25_3_3.pkl')
         self.declare_parameter('map_pgm_file', 'turtlebot3_dqn_stage4.pgm')
         self.declare_parameter('map_yaml_file', 'turtlebot3_dqn_stage4.yaml')
@@ -53,8 +55,10 @@ class ParticleFilter(Node):
         self.y_range_m = tuple(self.get_parameter("y_range_m").get_parameter_value().double_array_value)
         self.theta_range_deg = tuple(self.get_parameter("theta_range_deg").get_parameter_value().integer_array_value)
         self.odom_topic = self.get_parameter("odom_topic").get_parameter_value().string_value
-        self.odom_std = tuple(self.get_parameter("odom_std").get_parameter_value().double_array_value)
+        self.predict_noise = tuple(self.get_parameter("predict_noise").get_parameter_value().double_array_value)
         self.update_noise = self.get_parameter("update_noise").get_parameter_value().double_value
+        self.update_method = self.get_parameter("update_method").get_parameter_value().string_value
+        self.resampling_method = self.get_parameter("resampling_method").get_parameter_value().string_value
         self.map_pkl_file = self.get_parameter('map_pkl_file').get_parameter_value().string_value
         self.map_pgm_file = self.get_parameter('map_pgm_file').get_parameter_value().string_value
         self.map_yaml_file = self.get_parameter('map_yaml_file').get_parameter_value().string_value
@@ -66,18 +70,21 @@ class ParticleFilter(Node):
         self.get_logger().info(f"y_range_m: {self.y_range_m}")
         self.get_logger().info(f"theta_range_deg: {self.theta_range_deg}")
         self.get_logger().info(f"odom_topic: {self.odom_topic}")
-        self.get_logger().info(f"odom_std: {self.odom_std}")
+        self.get_logger().info(f"predict_noise: {self.predict_noise}")
         self.get_logger().info(f"update_noise: {self.update_noise}")
+        self.get_logger().info(f"update_method: {self.update_method}, allowed values: ['simple', 'gaussian']")
+        self.get_logger().info(f"resampling_method: {self.resampling_method}, allowed values: ['multinomial', 'systematic']")
         self.get_logger().info(f"map_pkl_file: {self.map_pkl_file}")
         self.get_logger().info(f"map_pgm_file: {self.map_pgm_file}")
         self.get_logger().info(f"map_yaml_file: {self.map_yaml_file}")
         self.get_logger().info(f"plot_enabled: {self.plot_enabled}")
         
-        # Create /parameter_events and selected odom topic subscription
-        self.event_subscription = self.create_subscription(ParameterEvent, '/parameter_events', self.parameter_event_callback, 10)
-        self.hfilter_pose_subscription = self.create_subscription(PoseStamped, '/hfilter_pose', self.hfilter_pose_callback, 10)
-        self.odom_subscription = self.create_subscription(PoseStamped, self.odom_topic, self.odom_callback, 10)
+        # Create required subscriptions
         self.scan_subscription = self.create_subscription(LaserScan, "/scan", self.scan_callback, 10)
+        self.odom_true_subscription = self.create_subscription(Odometry, '/odom', self.odom_true_callback, 10)
+        self.odom_subscription = self.create_subscription(PoseStamped, self.odom_topic, self.odom_callback, 10)
+        self.hfilter_pose_subscription = self.create_subscription(PoseStamped, '/hfilter_pose', self.hfilter_pose_callback, 10)
+        self.event_subscription = self.create_subscription(ParameterEvent, '/parameter_events', self.parameter_event_callback, 10)
 
         # Create /particles_poses publisher with a 30 Hz timer
         self.particles_poses_publisher = self.create_publisher(PoseArray, "/particles_poses", 10)
@@ -89,7 +96,7 @@ class ParticleFilter(Node):
 
         # Create /particle_pose publisher with a 30 Hz timer
         self.pfliter_pose_publisher = self.create_publisher(PoseStamped, "/pfilter_pose", 10)
-        self.pfilter_pose = self.create_timer(1 / 30, self.pfilter_pose_callback)
+        self.timer_pfilter_pose = self.create_timer(1 / 30, self.pfilter_pose_callback)
 
         # Create /pgm_map publisher for visualization
         self.pgm_map_publisher = self.create_publisher(OccupancyGrid, "/pgm_map", 10)
@@ -107,7 +114,7 @@ class ParticleFilter(Node):
 
         # Reference points
         self.reference_points = self.load_refernece_points()
-        self.closest_refernece_point = None
+        self.closest_refernece_point = ScanData(position=(0, 0, 0), measurements=[0] * 360)
 
         # Scan data
         self.current_scan_data = None
@@ -123,6 +130,7 @@ class ParticleFilter(Node):
         # Robot true position
         self.robot_true_x_m = 0.0
         self.robot_true_y_m = 0.0
+        self.robot_true_theta_rad = 0.0
 
         # Robot estimated position
         self.robot_x_m = 0.0
@@ -260,7 +268,7 @@ class ParticleFilter(Node):
 
         self.previous_odom_pose = pose_msg
 
-    def update_particles(self, particles, z, landmarks, R=0.05):
+    def update_particles(self, particles, z, landmarks, R=0.05, method='simple'):
         """
         Update particles' weights based on measurement z, noise R, and landmarks.
 
@@ -279,33 +287,46 @@ class ParticleFilter(Node):
                     for particle in particles
                 ]
             )
-            weights *= scipy.stats.norm(distances, R).pdf(z[i])
-            # errors = np.abs(distances - z[i])
-        
-            # # Update weights using a Gaussian-like function
-            # weights *= np.exp(-0.5 * (errors / 0.5) ** 2)
 
-        weights += 1.0e-300  # avoid round-off to zero
-        weights /= np.sum(weights)  # normalize
+            if method== 'simple':
+                errors = np.abs(distances - z[i])
+                weights *= 1 / (errors + 1.0e-6) 
+            elif method == 'gaussian':
+                weights *= scipy.stats.norm(distances, R).pdf(z[i])
 
-        # Assign updated weights back to particles
+        weights += 1.0e-300 
+        weights /= np.sum(weights)
+
         for i, particle in enumerate(particles):
             particle.weight = weights[i]
     
     def neff(self, particles):
         """
         Calculate the effective number of particles (N_eff), based on their weights.
-
-        Args:
-            particles (list of Particle): The particles whose effective number is to be calculated.
-
-        Returns:
-            float: The effective number of particles.
         """
+
         weights = np.array([particle.weight for particle in particles])
         return 1.0 / np.sum(np.square(weights))
+    
+    def multinomail_resampling(self, particles):
+        """
+        Performs multinomial resampling on a list of particles.
+        """
 
-    def systematic_resample(self, particles):
+        N = len(particles)
+        weights = np.array([particle.weight for particle in particles])
+        cumulative_sum = np.cumsum(weights)
+        cumulative_sum[-1] = 1.
+        indexes = np.searchsorted(cumulative_sum, np.random.random(N))
+
+        new_particles = [particles[index] for index in indexes]
+        resampled_particles = [
+            Particle(p.x, p.y, p.theta, 1.0 / len(indexes)) for p in new_particles
+        ]
+
+        return resampled_particles
+
+    def systematic_resampling(self, particles):
         """
         Performs systematic resampling on a list of Particle objects, returning only the indexes.
         """
@@ -475,16 +496,28 @@ class ParticleFilter(Node):
 
     def odom_callback(self, msg: PoseStamped) -> None:
         """
-        Callback function for the odometry velocity publisher.
+        Callback function for the odometry velocity/position publisher.
         """
 
         if self.previous_odom_pose_initialized is False:
             self.previous_odom_pose = msg
             self.previous_odom_pose_initialized = True
 
-        self.predict_particles(self.particles, msg, self.odom_std)
-        self.robot_true_x_m = msg.pose.position.x
-        self.robot_true_y_m = msg.pose.position.y
+        self.predict_particles(self.particles, msg, self.predict_noise)
+
+    def odom_true_callback(self, msg: Odometry) -> None:
+        """
+        Callback function for handling odometry messages.
+        """
+
+        self.robot_true_x_m = msg.pose.pose.position.x
+        self.robot_true_y_m = msg.pose.pose.position.y
+
+        # fmt: off
+        orientation_q = msg.pose.pose.orientation
+        quaternion = [orientation_q.x, orientation_q.y, orientation_q.z, orientation_q.w,]
+        _, _, yaw = tf_transformations.euler_from_quaternion(quaternion)
+        self.robot_true_theta_rad = yaw
 
     def hfilter_pose_callback(self, msg: PoseStamped) -> None:
         """
@@ -506,6 +539,12 @@ class ParticleFilter(Node):
         """
 
         self.current_scan_data = msg.ranges
+
+        # Replace 'inf' values with the maximum valid value from the reference data
+        max_valid_value = np.nanmax(self.closest_refernece_point.measurements[~np.isinf(self.closest_refernece_point.measurements)])  # Maximum value among non-infinite values.
+        current_scan_data_replaced_inf = np.where(np.isinf(self.current_scan_data), max_valid_value, self.current_scan_data)
+        self.current_scan_data = current_scan_data_replaced_inf
+
         # Aligin the current scan data with the closest reference point
         self.aligned_current_scan_data = np.roll(self.current_scan_data, int(self.orientation_difference - self.closest_refernece_point.position[2]))
 
@@ -527,12 +566,15 @@ class ParticleFilter(Node):
             euclidean_distance_true = np.linalg.norm([self.robot_true_x_m - point.position[0], self.robot_true_y_m - point.position[1]])
             self.true_euclidean_distances.append(euclidean_distance_true)
 
-        self.update_particles(self.particles, self.euclidean_distances, self.reference_points, self.update_noise)
+        self.update_particles(self.particles, self.euclidean_distances, self.reference_points, self.update_noise, self.update_method)
         self.particles_poses = self.particles_to_poses(self.particles)
         self.particles_poses_publisher.publish(self.particles_poses)
         if self.neff(self.particles) < len(self.particles) / 2:
-            indexes = self.systematic_resample(self.particles)
-            self.particles = self.resample_from_index(self.particles, indexes)
+            if self.resampling_method == 'multinomial':
+                self.particles = self.multinomail_resampling(self.particles)
+            elif self.resampling_method == 'systematic':
+                indexes = self.systematic_resampling(self.particles)
+                self.particles = self.resample_from_index(self.particles, indexes)
             assert np.allclose(
                 np.array([p.weight for p in self.particles]),
                 1 / len(self.particles),
@@ -569,12 +611,18 @@ class ParticleFilter(Node):
                 self.destroy_subscription(self.odom_subscription)
                 self.previous_odom_pose_initialized = False
                 self.odom_subscription = self.create_subscription(PoseStamped, self.odom_topic, self.odom_callback, 10)
-            elif changed_parameter.name == "odom_std":
-                self.get_logger().info(f"odom_std changed to: {changed_parameter.value.double_array_value}")
-                self.odom_std = tuple(changed_parameter.value.double_array_value)
+            elif changed_parameter.name == "predict_noise":
+                self.get_logger().info(f"predict_noise changed to: {changed_parameter.value.double_array_value}")
+                self.predict_noise = tuple(changed_parameter.value.double_array_value)
             elif changed_parameter.name == "update_noise":
                 self.get_logger().info(f"update_noise changed to: {changed_parameter.value.double_value}")
                 self.update_noise = changed_parameter.value.double_value
+            elif changed_parameter.name == "update_method":
+                self.get_logger().info(f"update_method changed to: {changed_parameter.value.string_value}")
+                self.update_method = changed_parameter.value.string_value
+            elif changed_parameter.name == "resampling_method":
+                self.get_logger().info(f"resampling_method changed to: {changed_parameter.value.string_value}")
+                self.resampling_method = changed_parameter.value.string_value
 
     def plot_callback(self) -> None:
         """
@@ -584,19 +632,19 @@ class ParticleFilter(Node):
 
         self.ax.cla()
 
-        # # Plot Current Scan Data
-        # self.ax.plot(
-        #     self.current_scan_data,
-        #     label="Current LaserScan Data",
-        #     color="#16FF00",
-        #     linewidth=2,
-        # )
-        # self.ax.fill_between(
-        #     range(len(self.current_scan_data)),
-        #     self.current_scan_data,
-        #     color="#16FF00",
-        #     alpha=0.3
-        # )
+        #Plot Current Scan Data
+        self.ax.plot(
+            self.current_scan_data,
+            label="Current LaserScan Data",
+            color="#16FF00",
+            linewidth=2,
+        )
+        self.ax.fill_between(
+            range(len(self.current_scan_data)),
+            self.current_scan_data,
+            color="#16FF00",
+            alpha=0.3
+        )
 
         self.ax.plot(
             self.closest_refernece_point.measurements,
@@ -612,24 +660,26 @@ class ParticleFilter(Node):
             alpha=0.3
         )
 
-        self.ax.plot(
-            self.aligned_current_scan_data,
-            label="Aligned LaserScan Data",
-            color="blue",
-            linewidth=2,
-            linestyle='dashed',
-        )
-        self.ax.fill_between(
-            range(len( self.aligned_current_scan_data)),
-            self.aligned_current_scan_data,
-            color="blue",
-            alpha=0.3
-        )
+        # self.ax.plot(
+        #     self.aligned_current_scan_data,
+        #     label="Aligned Current LaserScan Data",
+        #     color="blue",
+        #     linewidth=2,
+        #     linestyle='dashed',
+        # )
+        # self.ax.fill_between(
+        #     range(len( self.aligned_current_scan_data)),
+        #     self.aligned_current_scan_data,
+        #     color="blue",
+        #     alpha=0.3
+        # )
 
-        self.ax.set_xlabel("θ [°]", fontsize=12)
-        self.ax.set_ylabel("Distance [m]", fontsize=12)
+        self.ax.set_xlabel("θ [°]", fontsize=16)
+        self.ax.set_ylabel("Distance [m]", fontsize=16)
+        self.ax.tick_params(axis='both', which='major', labelsize=14)
+        #set legend font size
         self.ax.grid()
-        self.ax.legend()
+        self.ax.legend(fontsize=14, loc='upper right')
 
         plt.draw()
         plt.pause(0.00001)
@@ -645,12 +695,10 @@ class ParticleFilter(Node):
         #         f"Euclidean Distance: {self.euclidean_distances[i]:.2f}, True Euclidean Distance: {self.true_euclidean_distances[i]:.2f}"
         #     )
 
-        # # #log particles positions with theri weights
-        # # for i, particle in enumerate(self.particles):
-        # #     self.get_logger().info(f"Particle {i}: ({particle.x:.2f}, {particle.y:.2f}, {np.degrees(particle.theta):.2f}) Weight: {particle.weight:.2f}")
-        # time.sleep(0.25)
-        # clear_screen = "\033[2J\033[H"
-        # self.get_logger().info(f"{clear_screen}")
+        # #log particles positions with theri weights
+        # for i, particle in enumerate(self.particles):
+        #     self.get_logger().info(f"Particle {i}: ({particle.x:.2f}, {particle.y:.2f}, {np.degrees(particle.theta):.2f}) Weight: {particle.weight:.2f}")
+
 
 
 def main(args=None):
