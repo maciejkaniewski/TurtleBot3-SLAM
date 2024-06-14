@@ -10,6 +10,7 @@ import rclpy
 import scipy.stats
 import tf_transformations
 from ament_index_python.packages import get_package_share_directory
+from example_interfaces.srv import Trigger
 from geometry_msgs.msg import Pose, PoseArray, PoseStamped
 from nav_msgs.msg import OccupancyGrid, Odometry
 from particle_filter.particle import Particle
@@ -20,6 +21,7 @@ from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Header
 from utils.map_loader import MapLoader
 from utils.scan_data import ScanData
+
 
 class ParticleFilter(Node):
     """
@@ -104,6 +106,9 @@ class ParticleFilter(Node):
         self.publish_pgm_map()
         self.destroy_publisher(self.pgm_map_publisher)
 
+        # Create service for adding reference points
+        self.srv = self.create_service(Trigger, 'trigger_pf', self.trigger_callback)
+
         # Create particles
         self.particles = self.initialize_particles(self.num_particles, self.x_range_m, self.y_range_m, self.theta_range_deg)
         self.particles_poses = self.particles_to_poses(self.particles)
@@ -119,7 +124,7 @@ class ParticleFilter(Node):
         # Scan data
         self.current_scan_data = None
         self.aligned_current_scan_data = None
-        self.orientation_difference = 0
+        self.orientation_hf_deg = 0
 
         # Distances to reference points
         self.displacements_x = []
@@ -132,9 +137,9 @@ class ParticleFilter(Node):
         self.robot_true_y_m = 0.0
         self.robot_true_theta_rad = 0.0
 
-        # Robot estimated position
-        self.robot_x_m = 0.0
-        self.robot_y_m = 0.0
+        # Robot estimated position with Particle Filter
+        self.robot_pf_x_m = 0.0
+        self.robot_pf_y_m = 0.0
 
         # Timer for logging
         self.timer_logger = self.create_timer(0.1, self.logger_callback)
@@ -145,6 +150,17 @@ class ParticleFilter(Node):
             self.fig.canvas.manager.set_window_title('Particle Filter')
             self.plot_timer = self.create_timer(1, self.plot_callback)
             self.cbar_flag = True
+    
+    def trigger_callback(self, request, response):
+        """
+        Callback function for handling trigger requests.
+        """
+
+        self.get_logger().info('Received a trigger request.')
+        response.success = True
+        response.message = 'Trigger for the Particle Filter handled successfully.'
+        self.reference_points = np.append(self.reference_points, ScanData(position=(self.robot_pf_x_m , self.robot_pf_y_m  , self.orientation_hf_deg), measurements=self.current_scan_data))
+        return response
     
     def load_pgm_map(self) -> None:
         """
@@ -483,10 +499,10 @@ class ParticleFilter(Node):
         pose_stamped.header.frame_id = "odom"
 
         pose = pose_stamped.pose
-        pose.position.x = self.robot_x_m
-        pose.position.y = self.robot_y_m
+        pose.position.x = self.robot_pf_x_m
+        pose.position.y = self.robot_pf_y_m
 
-        quaternion = tf_transformations.quaternion_from_euler(0, 0, np.deg2rad(self.orientation_difference))
+        quaternion = tf_transformations.quaternion_from_euler(0, 0, np.deg2rad(self.orientation_hf_deg))
         pose.orientation.x = quaternion[0]
         pose.orientation.y = quaternion[1]
         pose.orientation.z = quaternion[2]
@@ -527,9 +543,11 @@ class ParticleFilter(Node):
         orientation_q = msg.pose.orientation
         quaternion = [orientation_q.x, orientation_q.y, orientation_q.z, orientation_q.w]
         _, _, yaw = tf_transformations.euler_from_quaternion(quaternion)
-        self.orientation_difference = np.rad2deg(yaw)
-        self.closest_refernece_point = self.get_closest_reference_point(msg, threshold=0.05)
-
+        self.orientation_hf_deg = np.rad2deg(yaw)
+        self.closest_refernece_point = self.get_closest_reference_point(msg, threshold=0.25)
+        if self.closest_refernece_point is None:
+            self.closest_refernece_point = ScanData(position=(0, 0, 0), measurements=[0] * 360)
+        
     def scan_callback(self, msg: LaserScan) -> None:
         """
         Callback function for handling laser scan messages.
@@ -546,7 +564,7 @@ class ParticleFilter(Node):
         self.current_scan_data = current_scan_data_replaced_inf
 
         # Aligin the current scan data with the closest reference point
-        self.aligned_current_scan_data = np.roll(self.current_scan_data, int(self.orientation_difference - self.closest_refernece_point.position[2]))
+        self.aligned_current_scan_data = np.roll(self.current_scan_data, int(self.orientation_hf_deg - self.closest_refernece_point.position[2]))
 
         self.displacements_x = []
         self.displacements_y = []
@@ -580,8 +598,8 @@ class ParticleFilter(Node):
                 1 / len(self.particles),
             )
         mean, var = self.estimate_particles(self.particles)
-        self.robot_x_m = mean[0]
-        self.robot_y_m = mean[1]
+        self.robot_pf_x_m = mean[0]
+        self.robot_pf_y_m = mean[1]
 
     def parameter_event_callback(self, event: ParameterEvent) -> None:
         """
@@ -689,6 +707,9 @@ class ParticleFilter(Node):
         Callback function for logging information.
         """
 
+        # cehc if  reference points and euclida distance are the smae lenght
+        # if len(self.reference_points) != len(self.euclidean_distances):
+        #     return
         # for i, point in enumerate(self.reference_points):
         #     self.get_logger().info(
         #         f"Reference Point {i}: ({point.position[0]:>5.2f}, {point.position[1]:>5.2f}, {point.position[2]:>5.2f}) "

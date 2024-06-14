@@ -13,7 +13,7 @@ from rcl_interfaces.msg import ParameterEvent
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 from utils.scan_data import ScanData
-
+from example_interfaces.srv import Trigger
 
 class HistogramFilter(Node):
     """
@@ -63,21 +63,30 @@ class HistogramFilter(Node):
         self.hfliter_pose_publisher = self.create_publisher(PoseStamped, "/hfilter_pose", 10)
         self.hfilter_pose = self.create_timer(1 / 5, self.hfilter_pose_callback)
 
+        # Create service for adding reference points
+        self.srv = self.create_service(Trigger, 'trigger_hf', self.trigger_callback)
+        self.pfilter_pose_subscription = self.create_subscription(PoseStamped, '/pfilter_pose', self.pfilter_pose_callback, 10)
+
         # Scan data
         self.scan_data = None
         self.current_scan_data = None
         self.closest_scan_data = None
         self.scan_data_histograms = np.array([])
 
-        # Robot estimated position
+        # Robot estimated position with Histogram Filter
         self.robot_x_m = 0.0
         self.robot_y_m = 0.0
         self.robot_theta_rad = 0.0
         self.robot_theta_deg = 0.0
 
+        # Robot estimated position with Particle Filter
+        self.robot_pf_x_m = 0.0
+        self.robot_pf_y_m = 0.0
+
         # Robot velocity/position position
         self.robot_x_m_o = 0.0
         self.robot_y_m_o = 0.0
+        self.robot_theta_rad_o = 0.0
 
         # Probabilities for the Histogram Filter
         self.probabilities = []
@@ -89,6 +98,26 @@ class HistogramFilter(Node):
             self.fig.canvas.manager.set_window_title('Histogram Filter')
             self.plot_timer = self.create_timer(1, self.plot_callback)
             self.cbar_flag = True
+
+    def pfilter_pose_callback(self, msg: PoseStamped) -> None:
+        """
+        Callback function for the particle filter pose subscriber.
+        """
+
+        self.robot_pf_x_m = msg.pose.position.x
+        self.robot_pf_y_m = msg.pose.position.y
+
+    def trigger_callback(self, request, response):
+        """
+        Callback function for handling trigger requests.
+        """
+
+        self.get_logger().info('Received a trigger request.')
+        response.success = True
+        response.message = 'Trigger for the Histogram Filter handled successfully.'
+        self.scan_data = np.append(self.scan_data, ScanData(position=(self.robot_pf_x_m, self.robot_pf_y_m, self.robot_theta_deg), measurements=self.current_scan_data))
+        self.convert_scan_data_to_histograms()
+        return response
 
     def load_scan_data(self):
         """
@@ -268,6 +297,10 @@ class HistogramFilter(Node):
 
         self.robot_x_m_o = msg.pose.position.x
         self.robot_y_m_o = msg.pose.position.y
+        orientation_q = msg.pose.orientation
+        quaternion = [orientation_q.x, orientation_q.y, orientation_q.z, orientation_q.w]
+        _, _, yaw = tf_transformations.euler_from_quaternion(quaternion)
+        self.robot_theta_deg_o = np.rad2deg(yaw)
 
     def plot_callback(self) -> None:
         """
