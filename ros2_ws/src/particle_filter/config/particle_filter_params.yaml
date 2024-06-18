@@ -8,8 +8,9 @@
     predict_noise: [0.015,0.005]
     update_noise: 0.125
     update_method: 'gaussian'
+    cone_angle_deg: 10
     resampling_method: 'systematic'
-    map_pkl_file: 'turtlebot3_dqn_stage4_grid_0.25_3_3.pkl'
-    map_pgm_file: 'turtlebot3_dqn_stage4.pgm'
+    map_pkl_file: 'turtlebot3_dqn_stage4u_grid_0.25_3_3.pkl'
+    map_pgm_file: 'turtlebot3_dqn_stage4u.pgm'
     map_yaml_file: 'turtlebot3_dqn_stage4.yaml'
-    plot_enabled: False
+    plot_enabled: True
