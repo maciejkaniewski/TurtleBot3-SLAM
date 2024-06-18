@@ -15,6 +15,8 @@ from sensor_msgs.msg import LaserScan
 from utils.scan_data import ScanData
 from example_interfaces.srv import Trigger
 
+INITIAL_POINTS = 4
+
 class HistogramFilter(Node):
     """
     Class representing the histogram filter node.
@@ -68,7 +70,7 @@ class HistogramFilter(Node):
         self.pfilter_pose_subscription = self.create_subscription(PoseStamped, '/pfilter_pose', self.pfilter_pose_callback, 10)
 
         # Scan data
-        self.scan_data = None
+        self.scan_data = []
         self.current_scan_data = None
         self.closest_scan_data = None
         self.scan_data_histograms = np.array([])
@@ -86,7 +88,7 @@ class HistogramFilter(Node):
         # Robot velocity/position position
         self.robot_x_m_o = 0.0
         self.robot_y_m_o = 0.0
-        self.robot_theta_rad_o = 0.0
+        self.robot_theta_deg_o = 0.0
 
         # Probabilities for the Histogram Filter
         self.probabilities = []
@@ -115,8 +117,13 @@ class HistogramFilter(Node):
         self.get_logger().info('Received a trigger request.')
         response.success = True
         response.message = 'Trigger for the Histogram Filter handled successfully.'
+        if len(self.scan_data) <  INITIAL_POINTS:
+            self.scan_data = np.append(self.scan_data, ScanData(position=(self.robot_x_m_o , self.robot_y_m_o , self.robot_theta_deg_o), measurements=self.current_scan_data))
+            self.convert_scan_data_to_histograms()
+            return response
         self.scan_data = np.append(self.scan_data, ScanData(position=(self.robot_pf_x_m, self.robot_pf_y_m, self.robot_theta_deg), measurements=self.current_scan_data))
         self.convert_scan_data_to_histograms()
+        self.get_logger().info(f"Added a new reference point at: ({self.robot_pf_x_m:.2f}, {self.robot_pf_y_m:.2f})")
         return response
 
     def load_scan_data(self):
@@ -142,6 +149,8 @@ class HistogramFilter(Node):
 
         # fmt: off
         for scan_data in self.scan_data:
+            # cap scan data to 3.5 meters
+            scan_data.measurements = np.clip(scan_data.measurements, a_min=None, a_max=3.5)
             hist, _ = np.histogram(scan_data.measurements, range=self.histogram_range_m, bins=self.histogram_bins)
             new_scan_data = ScanData(position=scan_data.position, measurements=hist)
             self.scan_data_histograms = np.append(self.scan_data_histograms, new_scan_data)
@@ -174,6 +183,9 @@ class HistogramFilter(Node):
             total_difference = self.compare_histograms(scan_data.measurements, current_histogram)
             self.probabilities.append(total_difference)
             self.probabilties_coords.append(scan_data.position)
+
+        # LOG probabilities
+        #self.get_logger().info(f"Probabilities: {self.probabilities}")
 
         # Convert lists to numpy arrays
         self.probabilities = np.array(self.probabilities)
@@ -222,14 +234,9 @@ class HistogramFilter(Node):
         adjusted_ref_data = np.roll(ref_data, -90)
         # TODO: Adjust the shift value based on the reference data
 
-        # Replace 'inf' values with the maximum valid value from the reference data
-        max_valid_value = np.nanmax(ref_data[~np.isinf(ref_data)])  # Maximum value among non-infinite values.
-        adjusted_ref_data = np.where(np.isinf(adjusted_ref_data), max_valid_value, adjusted_ref_data)
-        current_scan_data_replaced_inf = np.where(np.isinf(current_scan_data), max_valid_value, current_scan_data)
-
         # Vectorize the computation of the sum of squared differences for all shifts
         diffs = np.array([
-            np.sum((adjusted_ref_data - np.roll(current_scan_data_replaced_inf, shift)) ** 2)
+            np.sum((adjusted_ref_data - np.roll(current_scan_data, shift)) ** 2)
             for shift in range(360)
         ])
 
@@ -266,10 +273,13 @@ class HistogramFilter(Node):
         """
 
         self.current_scan_data = msg.ranges
+        # Cap current scan data to 3.5 meters
+        self.current_scan_data = np.clip(self.current_scan_data, a_min=None, a_max=3.5)
         hist, _ = np.histogram(msg.ranges, range=self.histogram_range_m, bins=self.histogram_bins)
-        self.robot_x_m, self.robot_y_m = self.localize_robot(hist)
-        self.robot_theta_deg = self.calculate_orientation(msg.ranges)
-        self.robot_theta_rad = np.radians(self.robot_theta_deg)
+        if len(self.scan_data) >= INITIAL_POINTS:
+            self.robot_x_m, self.robot_y_m = self.localize_robot(hist)
+            self.robot_theta_deg = self.calculate_orientation(self.current_scan_data)
+            self.robot_theta_rad = np.radians(self.robot_theta_deg)
         #self.get_logger().info(f"Robot position: (X: {self.robot_x_m:.2f} [m], Y: {self.robot_y_m:.2f} [m], θ: {self.robot_theta_deg:.0f} [°])")
         
     def parameter_event_callback(self, event: ParameterEvent) -> None:
@@ -307,6 +317,8 @@ class HistogramFilter(Node):
         Callback function for plotting.
 
         """
+        if len(self.scan_data) < INITIAL_POINTS:
+            return
 
         self.ax[0].cla()
         self.ax[1].cla()
@@ -325,6 +337,9 @@ class HistogramFilter(Node):
             color="#16FF00",
             alpha=0.3
         )
+
+        if self.closest_scan_data is None:
+            return
 
         self.ax[0].plot(
             self.closest_scan_data.measurements,
@@ -363,7 +378,7 @@ class HistogramFilter(Node):
         scatter = self.ax[2].scatter(
             [x[0] for x in self.probabilties_coords],
             [x[1] for x in self.probabilties_coords],
-            s=64,
+            s=128,
             c=self.probabilities,
             cmap='gnuplot2_r',
             marker='s',
@@ -375,9 +390,9 @@ class HistogramFilter(Node):
         # Sort the list of tuples by the probabilities in descending order
         sorted_probabilities_with_coords = sorted(probabilities_with_coords, key=lambda x: x[0], reverse=True)
 
-        # Iterate over the sorted list and annotate the points in the center
-        for rank, (probability, (x, y, _)) in enumerate(sorted_probabilities_with_coords, start=1):
-            self.ax[2].annotate(f"{rank}", (x, y), fontsize=8, color='red', ha='center', va='center')
+        # # Iterate over the sorted list and annotate the points in the center
+        # for rank, (probability, (x, y, _)) in enumerate(sorted_probabilities_with_coords, start=1):
+        #     self.ax[2].annotate(f"{rank}", (x, y), fontsize=10, color='#00ff00', ha='center', va='center')
 
         if self.cbar_flag:
             cbar = plt.colorbar(scatter, ax=self.ax[2])
@@ -392,8 +407,10 @@ class HistogramFilter(Node):
             cbar_ax.text(1.25, 1, 'Most\nProbable\nLocation', ha='left', va='top', transform=cbar_ax.transAxes)
             
 
-        self.ax[2].set_xlabel("X [m]",fontsize=12)
-        self.ax[2].set_ylabel("Y [m]",fontsize=12)
+        self.ax[2].set_xlabel("X [m]",fontsize=14)
+        self.ax[2].set_ylabel("Y [m]",fontsize=14)
+        #set tick size
+        self.ax[2].tick_params(axis='both', which='major', labelsize=12)
         
         plt.draw()
         plt.pause(0.00001)
@@ -402,8 +419,9 @@ class HistogramFilter(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = HistogramFilter()
-    node.load_scan_data()
-    node.convert_scan_data_to_histograms()
+    if INITIAL_POINTS == 0:
+        node.load_scan_data()
+        node.convert_scan_data_to_histograms()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
