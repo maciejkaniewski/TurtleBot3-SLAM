@@ -48,3 +48,13 @@ class ScanData:
             np.ndarray: The measurements of the scan data.
         """
         return self._measurements
+
+    @measurements.setter
+    def measurements(self, measurements: array.array):
+        """
+        Sets the measurements of the scan data.
+
+        Args:
+            measurements (array.array): The measurements of the scan data.
+        """
+        self._measurements = np.asarray(measurements, dtype=float)
