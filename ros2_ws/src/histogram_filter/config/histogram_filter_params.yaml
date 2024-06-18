@@ -2,6 +2,6 @@
   ros__parameters:
     histogram_bins: 20
     histogram_range_m: [0.12, 3.5]
-    histogram_comparison: 'chi_square'
-    map_pkl_file: 'turtlebot3_dqn_stage4_grid_0.25_3_3.pkl'
+    histogram_comparison: 'manhattan'
+    map_pkl_file: 'turtlebot3_dqn_stage4u_grid_0.25_3_3.pkl'
     plot_enabled: True
