@@ -22,6 +22,7 @@ from std_msgs.msg import Header
 from utils.map_loader import MapLoader
 from utils.scan_data import ScanData
 
+INITIAL_POINTS = 4
 
 class ParticleFilter(Node):
     """
@@ -45,6 +46,7 @@ class ParticleFilter(Node):
         self.declare_parameter("predict_noise", [0.015,0.005 ])
         self.declare_parameter("update_noise", 0.125)
         self.declare_parameter("update_method", 'gaussian')
+        self.declare_parameter("cone_angle_deg", 10)
         self.declare_parameter("resampling_method", 'systematic')
         self.declare_parameter('map_pkl_file', 'turtlebot3_dqn_stage4_grid_0.25_3_3.pkl')
         self.declare_parameter('map_pgm_file', 'turtlebot3_dqn_stage4.pgm')
@@ -60,6 +62,7 @@ class ParticleFilter(Node):
         self.predict_noise = tuple(self.get_parameter("predict_noise").get_parameter_value().double_array_value)
         self.update_noise = self.get_parameter("update_noise").get_parameter_value().double_value
         self.update_method = self.get_parameter("update_method").get_parameter_value().string_value
+        self.cone_angle_deg = self.get_parameter("cone_angle_deg").get_parameter_value().integer_value
         self.resampling_method = self.get_parameter("resampling_method").get_parameter_value().string_value
         self.map_pkl_file = self.get_parameter('map_pkl_file').get_parameter_value().string_value
         self.map_pgm_file = self.get_parameter('map_pgm_file').get_parameter_value().string_value
@@ -75,6 +78,7 @@ class ParticleFilter(Node):
         self.get_logger().info(f"predict_noise: {self.predict_noise}")
         self.get_logger().info(f"update_noise: {self.update_noise}")
         self.get_logger().info(f"update_method: {self.update_method}, allowed values: ['simple', 'gaussian']")
+        self.get_logger().info(f"cone_angle_deg: {self.cone_angle_deg}")
         self.get_logger().info(f"resampling_method: {self.resampling_method}, allowed values: ['multinomial', 'systematic']")
         self.get_logger().info(f"map_pkl_file: {self.map_pkl_file}")
         self.get_logger().info(f"map_pgm_file: {self.map_pgm_file}")
@@ -100,6 +104,7 @@ class ParticleFilter(Node):
         self.pfliter_pose_publisher = self.create_publisher(PoseStamped, "/pfilter_pose", 10)
         self.timer_pfilter_pose = self.create_timer(1 / 30, self.pfilter_pose_callback)
 
+
         # Create /pgm_map publisher for visualization
         self.pgm_map_publisher = self.create_publisher(OccupancyGrid, "/pgm_map", 10)
         self.load_pgm_map()
@@ -118,7 +123,15 @@ class ParticleFilter(Node):
         self.previous_odom_pose_initialized = False
 
         # Reference points
-        self.reference_points = self.load_refernece_points()
+        if INITIAL_POINTS == 0:
+            self.reference_points = self.load_refernece_points()
+            # cap reference points measuremnts to 3.5m
+            for point in self.reference_points:
+                point.measurements = np.clip(point.measurements, 0, 3.5)
+        else:
+            self.reference_points = []
+
+        #self.reference_points = []
         self.closest_refernece_point = ScanData(position=(0, 0, 0), measurements=[0] * 360)
 
         # Scan data
@@ -141,8 +154,22 @@ class ParticleFilter(Node):
         self.robot_pf_x_m = 0.0
         self.robot_pf_y_m = 0.0
 
+        # Robot velocity/position position
+        self.robot_x_m_o = 0.0
+        self.robot_y_m_o = 0.0
+        self.robot_theta_deg_o = 0.0
+
         # Timer for logging
         self.timer_logger = self.create_timer(0.1, self.logger_callback)
+
+        self.particles_fitler_loop_timer = self.create_timer(1/30, self.particle_filter_callback)
+
+        self.euclidean_closest = []
+        self.euclidean_closest_indexes = []
+
+        self.new_reference_points = []
+
+        self.zs = []
 
         # Plotting
         if self.plot_enabled:
@@ -150,6 +177,32 @@ class ParticleFilter(Node):
             self.fig.canvas.manager.set_window_title('Particle Filter')
             self.plot_timer = self.create_timer(1, self.plot_callback)
             self.cbar_flag = True
+
+    def particle_filter_callback(self):
+        """
+        Callback function for main Particle Filter loop.
+        """
+        #self.update_particles(self.particles, self.zs, self.reference_points, self.update_noise, self.update_method)
+
+        if len(self.reference_points) < INITIAL_POINTS:
+            return
+        self.update_particles(self.particles, self.euclidean_distances, self.reference_points, self.update_noise, self.update_method)
+        self.particles_poses = self.particles_to_poses(self.particles)
+        self.particles_poses_publisher.publish(self.particles_poses)
+        if self.neff(self.particles) < len(self.particles) / 2:
+            if self.resampling_method == 'multinomial':
+                self.particles = self.multinomail_resampling(self.particles)
+            elif self.resampling_method == 'systematic':
+                indexes = self.systematic_resampling(self.particles)
+                self.particles = self.resample_from_index(self.particles, indexes)
+            assert np.allclose(
+                np.array([p.weight for p in self.particles]),
+                1 / len(self.particles),
+            )
+        mean, var = self.estimate_particles(self.particles)
+        self.robot_pf_x_m = mean[0]
+        self.robot_pf_y_m = mean[1]
+
     
     def trigger_callback(self, request, response):
         """
@@ -159,7 +212,12 @@ class ParticleFilter(Node):
         self.get_logger().info('Received a trigger request.')
         response.success = True
         response.message = 'Trigger for the Particle Filter handled successfully.'
+        # first initial poitn are colelted with odom
+        if len(self.reference_points) < INITIAL_POINTS:
+            self.reference_points = np.append(self.reference_points, ScanData(position=(self.robot_x_m_o , self.robot_y_m_o  , self.robot_theta_deg_o), measurements=self.current_scan_data))
+            return response
         self.reference_points = np.append(self.reference_points, ScanData(position=(self.robot_pf_x_m , self.robot_pf_y_m  , self.orientation_hf_deg), measurements=self.current_scan_data))
+        self.get_logger().info(f"Added a new reference point at: ({self.robot_pf_x_m:.2f}, {self.robot_pf_y_m:.2f})")
         return response
     
     def load_pgm_map(self) -> None:
@@ -181,12 +239,24 @@ class ParticleFilter(Node):
 
         self.pgm_map = MapLoader(world_yaml_path, world_pgm_path)
 
+    def save_scan_data(self, file_path: str) -> None:
+        """
+        Save the scan data to a file using pickle.
+
+        Args:
+            file_path (str): The file path to the output file.
+        """
+
+        with open(file_path, "wb") as file:
+            pickle.dump(self.reference_points, file)
+
+
     def publish_pgm_map(self) -> None:
         """
         Publishes the loaded map as an OccupancyGrid message.
         """
 
-        time.sleep(2)
+        #time.sleep(2)
         occupancy_grid_msg = OccupancyGrid()
         inverted_img = 255 - self.pgm_map.img
         scaled_img = np.flip((inverted_img * (100.0 / 255.0)).astype(np.int8), 0)
@@ -294,7 +364,8 @@ class ParticleFilter(Node):
             R (float): Measurement noise.
             landmarks (list of tuples): Positions of landmarks.
         """
-
+        if len(landmarks) != len(z):
+            return
         weights = np.array([particle.weight for particle in particles])
         for i, landmark in enumerate(landmarks):
             distances = np.array(
@@ -518,6 +589,13 @@ class ParticleFilter(Node):
         if self.previous_odom_pose_initialized is False:
             self.previous_odom_pose = msg
             self.previous_odom_pose_initialized = True
+        
+        self.robot_x_m_o = msg.pose.position.x
+        self.robot_y_m_o = msg.pose.position.y
+        orientation_q = msg.pose.orientation
+        quaternion = [orientation_q.x, orientation_q.y, orientation_q.z, orientation_q.w]
+        _, _, yaw = tf_transformations.euler_from_quaternion(quaternion)
+        self.robot_theta_deg_o = np.rad2deg(yaw)
 
         self.predict_particles(self.particles, msg, self.predict_noise)
 
@@ -557,12 +635,10 @@ class ParticleFilter(Node):
         """
 
         self.current_scan_data = msg.ranges
+        self.current_scan_data = np.clip(self.current_scan_data, a_min=None, a_max=3.5)
 
-        # Replace 'inf' values with the maximum valid value from the reference data
-        max_valid_value = np.nanmax(self.closest_refernece_point.measurements[~np.isinf(self.closest_refernece_point.measurements)])  # Maximum value among non-infinite values.
-        current_scan_data_replaced_inf = np.where(np.isinf(self.current_scan_data), max_valid_value, self.current_scan_data)
-        self.current_scan_data = current_scan_data_replaced_inf
-
+        if len(self.reference_points) < INITIAL_POINTS:
+            return
         # Aligin the current scan data with the closest reference point
         self.aligned_current_scan_data = np.roll(self.current_scan_data, int(self.orientation_hf_deg - self.closest_refernece_point.position[2]))
 
@@ -573,8 +649,8 @@ class ParticleFilter(Node):
 
         #Calulate displcements for every refenece point
         for point in self.reference_points:
-            x_displacement = self.calculate_scan_displacement(point.measurements, self.aligned_current_scan_data, axis='x')
-            y_displacement = self.calculate_scan_displacement(point.measurements, self.aligned_current_scan_data, axis='y')
+            x_displacement = self.calculate_scan_displacement(point.measurements, self.aligned_current_scan_data, axis='x', cone_angle=self.cone_angle_deg)
+            y_displacement = self.calculate_scan_displacement(point.measurements, self.aligned_current_scan_data, axis='y', cone_angle=self.cone_angle_deg)
             self.displacements_x.append(x_displacement)
             self.displacements_y.append(y_displacement)
 
@@ -584,22 +660,17 @@ class ParticleFilter(Node):
             euclidean_distance_true = np.linalg.norm([self.robot_true_x_m - point.position[0], self.robot_true_y_m - point.position[1]])
             self.true_euclidean_distances.append(euclidean_distance_true)
 
-        self.update_particles(self.particles, self.euclidean_distances, self.reference_points, self.update_noise, self.update_method)
-        self.particles_poses = self.particles_to_poses(self.particles)
-        self.particles_poses_publisher.publish(self.particles_poses)
-        if self.neff(self.particles) < len(self.particles) / 2:
-            if self.resampling_method == 'multinomial':
-                self.particles = self.multinomail_resampling(self.particles)
-            elif self.resampling_method == 'systematic':
-                indexes = self.systematic_resampling(self.particles)
-                self.particles = self.resample_from_index(self.particles, indexes)
-            assert np.allclose(
-                np.array([p.weight for p in self.particles]),
-                1 / len(self.particles),
-            )
-        mean, var = self.estimate_particles(self.particles)
-        self.robot_pf_x_m = mean[0]
-        self.robot_pf_y_m = mean[1]
+        robot_true_position = np.array([self.robot_true_x_m, self.robot_true_y_m])
+        self.zs = []
+        # Calculate the distance from the robot's position to each reference point
+        self.zs = np.array([np.linalg.norm(robot_true_position - np.array([point.position[0], point.position[1]])) for point in self.reference_points])
+    
+        # self.euclidean_closest = np.sort(self.euclidean_distances)[:N_CLOSEST_MEASUREMENTS]
+        # self.euclidean_closest_indexes = np.argsort(self.euclidean_distances)[:N_CLOSEST_MEASUREMENTS]
+
+        # self.new_reference_points = np.array([self.reference_points[i] for i in self.euclidean_closest_indexes])
+
+        #self.update_particles(self.particles, self.euclidean_closest, self.new_reference_points, self.update_noise, self.update_method)
 
     def parameter_event_callback(self, event: ParameterEvent) -> None:
         """
@@ -641,6 +712,9 @@ class ParticleFilter(Node):
             elif changed_parameter.name == "resampling_method":
                 self.get_logger().info(f"resampling_method changed to: {changed_parameter.value.string_value}")
                 self.resampling_method = changed_parameter.value.string_value
+            elif changed_parameter.name == "cone_angle_deg":
+                self.get_logger().info(f"cone_angle_deg changed to: {changed_parameter.value.integer_value}")
+                self.cone_angle_deg = changed_parameter.value.integer_value
 
     def plot_callback(self) -> None:
         """
@@ -648,21 +722,24 @@ class ParticleFilter(Node):
 
         """
 
+        if len(self.reference_points) < INITIAL_POINTS:
+            return
+
         self.ax.cla()
 
         #Plot Current Scan Data
-        self.ax.plot(
-            self.current_scan_data,
-            label="Current LaserScan Data",
-            color="#16FF00",
-            linewidth=2,
-        )
-        self.ax.fill_between(
-            range(len(self.current_scan_data)),
-            self.current_scan_data,
-            color="#16FF00",
-            alpha=0.3
-        )
+        # self.ax.plot(
+        #     self.current_scan_data,
+        #     label="Current LaserScan Data",
+        #     color="#16FF00",
+        #     linewidth=2,
+        # )
+        # self.ax.fill_between(
+        #     range(len(self.current_scan_data)),
+        #     self.current_scan_data,
+        #     color="#16FF00",
+        #     alpha=0.3
+        # )
 
         self.ax.plot(
             self.closest_refernece_point.measurements,
@@ -678,19 +755,22 @@ class ParticleFilter(Node):
             alpha=0.3
         )
 
-        # self.ax.plot(
-        #     self.aligned_current_scan_data,
-        #     label="Aligned Current LaserScan Data",
-        #     color="blue",
-        #     linewidth=2,
-        #     linestyle='dashed',
-        # )
-        # self.ax.fill_between(
-        #     range(len( self.aligned_current_scan_data)),
-        #     self.aligned_current_scan_data,
-        #     color="blue",
-        #     alpha=0.3
-        # )
+        if self.aligned_current_scan_data is None:
+            return
+
+        self.ax.plot(
+            self.aligned_current_scan_data,
+            label="Aligned Current LaserScan Data",
+            color="blue",
+            linewidth=2,
+            linestyle='dashed',
+        )
+        self.ax.fill_between(
+            range(len( self.aligned_current_scan_data)),
+            self.aligned_current_scan_data,
+            color="blue",
+            alpha=0.3
+        )
 
         self.ax.set_xlabel("θ [°]", fontsize=16)
         self.ax.set_ylabel("Distance [m]", fontsize=16)
@@ -707,7 +787,7 @@ class ParticleFilter(Node):
         Callback function for logging information.
         """
 
-        # cehc if  reference points and euclida distance are the smae lenght
+        #cehc if  reference points and euclida distance are the smae lenght
         # if len(self.reference_points) != len(self.euclidean_distances):
         #     return
         # for i, point in enumerate(self.reference_points):
@@ -715,11 +795,27 @@ class ParticleFilter(Node):
         #         f"Reference Point {i}: ({point.position[0]:>5.2f}, {point.position[1]:>5.2f}, {point.position[2]:>5.2f}) "
         #         f"Euclidean Distance: {self.euclidean_distances[i]:.2f}, True Euclidean Distance: {self.true_euclidean_distances[i]:.2f}"
         #     )
+        # self.get_logger().info("Closest Reference Point: ")
+        # if len(self.new_reference_points) != len(self.euclidean_closest):
+        #     return
+        # for i, point in enumerate(self.new_reference_points):
+        #     self.get_logger().info(
+        #         f"Reference Point {i}: ({point.position[0]:>5.2f}, {point.position[1]:>5.2f}, {point.position[2]:>5.2f}) "
+        #         f"Euclidean Distance: {self.euclidean_closest[i]:.2f}, True Euclidean Distance: {self.true_euclidean_distances[i]:.2f}"
+        #     )
+
+
+        # time.sleep(0.05)
+        # clear_screen = "\033[2J\033[H"
+        # self.get_logger().info(f"{clear_screen}")
 
         # #log particles positions with theri weights
         # for i, particle in enumerate(self.particles):
         #     self.get_logger().info(f"Particle {i}: ({particle.x:.2f}, {particle.y:.2f}, {np.degrees(particle.theta):.2f}) Weight: {particle.weight:.2f}")
-
+        # log pf position
+        self.get_logger().info(f"PF Position: ({self.robot_pf_x_m:.2f}, {self.robot_pf_y_m:.2f}), PF Orientation: {self.orientation_hf_deg:.2f}")
+        # log true position
+        self.get_logger().info(f"True Position: ({self.robot_true_x_m:.2f}, {self.robot_true_y_m:.2f}), True Orientation: {np.degrees(self.robot_true_theta_rad):.2f}")
 
 
 def main(args=None):
@@ -728,6 +824,7 @@ def main(args=None):
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
+        node.save_scan_data("/home/mkaniews/Desktop/map.pkl")
         node.destroy_node()
 
 
