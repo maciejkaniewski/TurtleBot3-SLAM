@@ -13,4 +13,4 @@
     map_pkl_file: 'turtlebot3_dqn_stage4u_grid_0.25_3_3.pkl'
     map_pgm_file: 'turtlebot3_dqn_stage4u.pgm'
     map_yaml_file: 'turtlebot3_dqn_stage4.yaml'
-    plot_enabled: True
+    plot_enabled: False

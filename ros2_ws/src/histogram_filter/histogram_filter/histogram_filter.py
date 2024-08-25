@@ -15,7 +15,7 @@ from sensor_msgs.msg import LaserScan
 from utils.scan_data import ScanData
 from example_interfaces.srv import Trigger
 
-INITIAL_POINTS = 4
+INITIAL_POINTS = 0
 
 class HistogramFilter(Node):
     """
@@ -86,7 +86,7 @@ class HistogramFilter(Node):
         self.robot_pf_y_m = 0.0
 
         # Robot velocity/position position
-        self.robot_x_m_o = 0.0
+        self.robot_x_m_o = 0.0e
         self.robot_y_m_o = 0.0
         self.robot_theta_deg_o = 0.0
 

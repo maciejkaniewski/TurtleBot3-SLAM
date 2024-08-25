@@ -119,9 +119,9 @@ class OdomErrors(Node):
 
         # Plot errors with time as the x-axis
         plt.figure(figsize=(10, 6))
-        plt.plot(times, vel_errors[:num_points], label='Error /odom_vel', color='blue')
-        plt.plot(times, pos_errors[:num_points], label='Error /odom_pos', color='red')
-        plt.plot(times, pfilter_errors[:num_points], label='Error /pfilter_pose', color='purple')
+        plt.plot(times, vel_errors[:num_points], label='Error /odom_vel', color='blue', linestyle='dashed')
+        plt.plot(times, pos_errors[:num_points], label='Error /odom_pos', color='red', linestyle='dotted')
+        plt.plot(times, pfilter_errors[:num_points], label='Error /pfilter_pose', color='purple', linestyle='dashdot')
         plt.xlabel('Time [s]', fontsize=12)
         plt.ylabel('Euclidean Distance Error [m]', fontsize=12)
         plt.title('Odometry Error Analysis over Time')

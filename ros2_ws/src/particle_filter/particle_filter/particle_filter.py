@@ -22,7 +22,7 @@ from std_msgs.msg import Header
 from utils.map_loader import MapLoader
 from utils.scan_data import ScanData
 
-INITIAL_POINTS = 4
+INITIAL_POINTS = 0
 
 class ParticleFilter(Node):
     """
@@ -46,7 +46,7 @@ class ParticleFilter(Node):
         self.declare_parameter("predict_noise", [0.015,0.005 ])
         self.declare_parameter("update_noise", 0.125)
         self.declare_parameter("update_method", 'gaussian')
-        self.declare_parameter("cone_angle_deg", 10)
+        self.declare_parameter("cone_angle_deg", 15)
         self.declare_parameter("resampling_method", 'systematic')
         self.declare_parameter('map_pkl_file', 'turtlebot3_dqn_stage4_grid_0.25_3_3.pkl')
         self.declare_parameter('map_pgm_file', 'turtlebot3_dqn_stage4.pgm')
@@ -121,7 +121,6 @@ class ParticleFilter(Node):
         # Initialize the previous odometry pose
         self.previous_odom_pose = PoseStamped()
         self.previous_odom_pose_initialized = False
-
         # Reference points
         if INITIAL_POINTS == 0:
             self.reference_points = self.load_refernece_points()
