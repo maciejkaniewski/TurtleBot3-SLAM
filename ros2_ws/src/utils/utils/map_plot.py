@@ -5,11 +5,11 @@ import math
 import signal
 
 # Define the path to your .pkl file
-file_path = "turtlebot3_dqn_stage4_grid_0.25_full.pkl"
+#file_path = "turtlebot3_dqn_stage4_grid_0.25_full.pkl"
 #file_path = "turtlebot3_dqn_stage4_grid_0.25_10_10.pkl"
 #file_path = "turtlebot3_dqn_stage4_grid_0.25_5_5.pkl"
-#file_path = "turtlebot3_dqn_stage4_grid_0.25_3_3.pkl"
-file_path = "map11.pkl"
+file_path = "turtlebot3_dqn_stage4_grid_0.25_10_10.pkl"
+#file_path = "map11.pkl"
 #file_path = "map15.pkl"
 
 #file_path = "turtlebot3_dqn_stage4u_grid_0.25.pkl"

@@ -23,6 +23,7 @@ from utils.map_loader import MapLoader
 from utils.scan_data import ScanData
 
 INITIAL_POINTS = 0
+THRESHOLD = 0.3  # Set the threshold distance for filtering reference points
 
 class ParticleFilter(Node):
     """
@@ -167,6 +168,7 @@ class ParticleFilter(Node):
         self.euclidean_closest_indexes = []
 
         self.new_reference_points = []
+        self.filtered_reference_points = []
 
         self.zs = []
 
@@ -185,7 +187,7 @@ class ParticleFilter(Node):
 
         if len(self.reference_points) < INITIAL_POINTS:
             return
-        self.update_particles(self.particles, self.euclidean_distances, self.reference_points, self.update_noise, self.update_method)
+        self.update_particles(self.particles, self.euclidean_distances, self.filtered_reference_points, self.update_noise, self.update_method)
         self.particles_poses = self.particles_to_poses(self.particles)
         self.particles_poses_publisher.publish(self.particles_poses)
         if self.neff(self.particles) < len(self.particles) / 2:
@@ -646,8 +648,16 @@ class ParticleFilter(Node):
         self.euclidean_distances = []
         self.true_euclidean_distances = []
 
+        # Filter reference points within the threshold
+        self.filtered_reference_points = [
+            point for point in self.reference_points
+            if np.linalg.norm([self.robot_true_x_m - point.position[0], self.robot_true_y_m - point.position[1]]) <= THRESHOLD
+        ]
+
+        self.get_logger().info(f"Filtered Reference Points Count: {len(self.filtered_reference_points)}")
+
         #Calulate displcements for every refenece point
-        for point in self.reference_points:
+        for point in self.filtered_reference_points:
             x_displacement = self.calculate_scan_displacement(point.measurements, self.aligned_current_scan_data, axis='x', cone_angle=self.cone_angle_deg)
             y_displacement = self.calculate_scan_displacement(point.measurements, self.aligned_current_scan_data, axis='y', cone_angle=self.cone_angle_deg)
             self.displacements_x.append(x_displacement)
@@ -786,35 +796,28 @@ class ParticleFilter(Node):
         Callback function for logging information.
         """
 
-        #cehc if  reference points and euclida distance are the smae lenght
-        # if len(self.reference_points) != len(self.euclidean_distances):
-        #     return
-        # for i, point in enumerate(self.reference_points):
-        #     self.get_logger().info(
-        #         f"Reference Point {i}: ({point.position[0]:>5.2f}, {point.position[1]:>5.2f}, {point.position[2]:>5.2f}) "
-        #         f"Euclidean Distance: {self.euclidean_distances[i]:.2f}, True Euclidean Distance: {self.true_euclidean_distances[i]:.2f}"
-        #     )
-        # self.get_logger().info("Closest Reference Point: ")
-        # if len(self.new_reference_points) != len(self.euclidean_closest):
-        #     return
-        # for i, point in enumerate(self.new_reference_points):
-        #     self.get_logger().info(
-        #         f"Reference Point {i}: ({point.position[0]:>5.2f}, {point.position[1]:>5.2f}, {point.position[2]:>5.2f}) "
-        #         f"Euclidean Distance: {self.euclidean_closest[i]:.2f}, True Euclidean Distance: {self.true_euclidean_distances[i]:.2f}"
-        #     )
+        # cehc if  reference points and euclida distance are the smae lenght
+        if len(self.filtered_reference_points) != len(self.euclidean_distances):
+            return
+        for i, point in enumerate(self.filtered_reference_points):
+            self.get_logger().info(
+                f"Reference Point {i}: ({point.position[0]:>5.2f}, {point.position[1]:>5.2f}, {point.position[2]:>5.2f}) "
+                f"Euclidean Distance: {self.euclidean_distances[i]:.2f}, True Euclidean Distance: {self.true_euclidean_distances[i]:.2f}"
+            )
+        self.get_logger().info(f"Closest Reference Point: {self.closest_refernece_point.position}")
 
 
-        # time.sleep(0.05)
-        # clear_screen = "\033[2J\033[H"
-        # self.get_logger().info(f"{clear_screen}")
-
-        # #log particles positions with theri weights
+        #log particles positions with theri weights
         # for i, particle in enumerate(self.particles):
         #     self.get_logger().info(f"Particle {i}: ({particle.x:.2f}, {particle.y:.2f}, {np.degrees(particle.theta):.2f}) Weight: {particle.weight:.2f}")
-        # log pf position
+        #log pf position
         self.get_logger().info(f"PF Position: ({self.robot_pf_x_m:.2f}, {self.robot_pf_y_m:.2f}), PF Orientation: {self.orientation_hf_deg:.2f}")
         # log true position
         self.get_logger().info(f"True Position: ({self.robot_true_x_m:.2f}, {self.robot_true_y_m:.2f}), True Orientation: {np.degrees(self.robot_true_theta_rad):.2f}")
+
+        time.sleep(0.1)
+        clear_screen = "\033[2J\033[H"
+        self.get_logger().info(f"{clear_screen}")
 
 
 def main(args=None):

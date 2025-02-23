@@ -14,8 +14,10 @@ from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 from utils.scan_data import ScanData
 from example_interfaces.srv import Trigger
+from nav_msgs.msg import Odometry
 
 INITIAL_POINTS = 0
+THRESHOLD = 0.30
 
 class HistogramFilter(Node):
     """
@@ -45,6 +47,7 @@ class HistogramFilter(Node):
         self.map_pkl_file = self.get_parameter('map_pkl_file').get_parameter_value().string_value
         self.plot_enabled = self.get_parameter('plot_enabled').get_parameter_value().bool_value
         self.odom_topic = self.get_parameter('odom_topic').get_parameter_value().string_value
+        
 
         self.histogram_range_m = tuple(self.histogram_range_m)
 
@@ -60,6 +63,7 @@ class HistogramFilter(Node):
         self.scan_subscription = self.create_subscription(LaserScan, "/scan", self.scan_callback, 10)
         self.event_subscription = self.create_subscription(ParameterEvent, '/parameter_events', self.parameter_event_callback, 10)
         self.odom_subscription = self.create_subscription(PoseStamped, self.odom_topic, self.odom_callback, 10)
+        self.odom_true_subscription = self.create_subscription(Odometry, '/odom', self.odom_true_callback, 10)
 
         # Create /histogram_pose publisher with a 5 Hz timer
         self.hfliter_pose_publisher = self.create_publisher(PoseStamped, "/hfilter_pose", 10)
@@ -75,6 +79,11 @@ class HistogramFilter(Node):
         self.closest_scan_data = None
         self.scan_data_histograms = np.array([])
 
+        # Robot true position
+        self.robot_true_x_m = 0.0
+        self.robot_true_y_m = 0.0
+        self.robot_true_theta_rad = 0.0
+
         # Robot estimated position with Histogram Filter
         self.robot_x_m = 0.0
         self.robot_y_m = 0.0
@@ -86,7 +95,7 @@ class HistogramFilter(Node):
         self.robot_pf_y_m = 0.0
 
         # Robot velocity/position position
-        self.robot_x_m_o = 0.0e
+        self.robot_x_m_o = 0.0
         self.robot_y_m_o = 0.0
         self.robot_theta_deg_o = 0.0
 
@@ -96,9 +105,9 @@ class HistogramFilter(Node):
 
         # Plotting
         if self.plot_enabled:
-            self.fig, self.ax = plt.subplots(1, 3, figsize=(21, 6))
+            self.fig, self.ax = plt.subplots(1, 1, figsize=(10, 8))
             self.fig.canvas.manager.set_window_title('Histogram Filter')
-            self.plot_timer = self.create_timer(1, self.plot_callback)
+            self.plot_timer = self.create_timer(0.100, self.plot_callback)
             self.cbar_flag = True
 
     def pfilter_pose_callback(self, msg: PoseStamped) -> None:
@@ -181,15 +190,24 @@ class HistogramFilter(Node):
 
         for i, scan_data in enumerate(self.scan_data_histograms):
             total_difference = self.compare_histograms(scan_data.measurements, current_histogram)
-            self.probabilities.append(total_difference)
-            self.probabilties_coords.append(scan_data.position)
+            
+            # Calculate Euclidean distance from odometry position
+            scan_x, scan_y, _ = scan_data.position
+            distance = np.sqrt((scan_x - self.robot_x_m_o) ** 2 + (scan_y - self.robot_y_m_o) ** 2)
+            
+            # Only keep data points within the THRESHOLD distance
+            if distance <= THRESHOLD:
+                self.probabilities.append(total_difference)
+                self.probabilties_coords.append(scan_data.position)
 
-        # LOG probabilities
-        #self.get_logger().info(f"Probabilities: {self.probabilities}")
-
-        # Convert lists to numpy arrays
+        # Convert lists to numpy arrays AFTER filtering
         self.probabilities = np.array(self.probabilities)
         self.probabilties_coords = np.array(self.probabilties_coords)
+
+        if len(self.probabilities) == 0:
+            self.get_logger().warn("No valid reference points within threshold! Localization might fail.")
+            return self.robot_x_m_o, self.robot_y_m_o  # Return odometry position as fallback
+
 
         # Normalize probabilities to [0, 1] range
         self.probabilities = self.probabilities - np.min(self.probabilities)
@@ -198,28 +216,25 @@ class HistogramFilter(Node):
         # Invert the probabilities and re-normalize to sum up to 1
         self.probabilities = (1 - self.probabilities) / np.sum(1 - self.probabilities)
 
+        # LOG probabilities
+        #self.get_logger().info(f"Probabilities: {self.probabilities}")
+
         index = np.argmax(self.probabilities)
-        self.closest_scan_data = self.scan_data[index]
         estimated_x, estimated_y, _ = self.probabilties_coords[index]
+        # Assign closes scan data using the x,y coordinates
+        
+        min_distance = float('inf')
+        for scan_data in self.scan_data:
+            scan_x, scan_y, _ = scan_data.position
+            distance = np.sqrt((scan_x - estimated_x) ** 2 + (scan_y - estimated_y) ** 2)
+            
+            if distance < min_distance:
+                min_distance = distance
+                self.closest_scan_data = scan_data  # Assign the closest scan data
 
-        # Create a list of tuples with each probability and its corresponding coordinates
-        probabilities_with_coords_and_scans = list(zip(self.probabilities, self.scan_data))
+        #self.get_logger().info(f"Closest reference point: ({self.closest_scan_data.position[0]:.2f}, {self.closest_scan_data.position[1]:.2f})")
 
-        # Sort the list of tuples by the probabilities in descending order
-        sorted_probabilities_with_coords = sorted(probabilities_with_coords_and_scans, key=lambda x: x[0], reverse=True)
-        dsitance_list = []
 
-        # for probability, scan in sorted_probabilities_with_coords:
-        #     estimated_x = scan.position[0]
-        #     estimated_y = scan.position[1]
-        #     self.closest_scan_data = scan
-
-        #     distance = np.linalg.norm([self.robot_x_m_o - estimated_x, self.robot_y_m_o - estimated_y])
-        #     # id dsitance is bigger than 0.5m look for next best scan
-        #     if distance > 0.25:
-        #         continue
-        #     else:
-        #         break
         return estimated_x, estimated_y
 
     def calculate_orientation(self, current_scan_data):
@@ -300,6 +315,26 @@ class HistogramFilter(Node):
                 self.get_logger().info(f"histogram_comparison changed to: {changed_parameter.value.string_value}")
                 self.histogram_comparison = changed_parameter.value.string_value
 
+    def check_and_reset_odometry(self):
+        """
+        Checks if the robot is close enough to the selected reference point to reset odometry.
+        """
+
+        RESET_THRESHOLD = 0.01  # Robot must be within 1cm of the reference point to reset odometry
+
+        #  log closest_scan_data position
+        if self.closest_scan_data is None:
+            return
+        
+        # Use self.closest_scan_data to get the reference point
+        distance = np.linalg.norm([self.robot_x_m_o - self.closest_scan_data.position[0], self.robot_y_m_o - self.closest_scan_data.position[1]])
+        
+        if distance < RESET_THRESHOLD:
+            #self.get_logger().info("Odometry reset point reached!")
+            self.robot_x_m_o = self.closest_scan_data.position[0]
+            self.robot_y_m_o = self.closest_scan_data.position[1]
+            #self.get_logger().info(f"Odometry reset to: ({self.robot_x_m_o:.2f}, {self.robot_y_m_o:.2f})")
+
     def odom_callback(self, msg: PoseStamped) -> None:
         """
         Callback function for the odometry velocity/position publisher.
@@ -311,6 +346,23 @@ class HistogramFilter(Node):
         quaternion = [orientation_q.x, orientation_q.y, orientation_q.z, orientation_q.w]
         _, _, yaw = tf_transformations.euler_from_quaternion(quaternion)
         self.robot_theta_deg_o = np.rad2deg(yaw)
+        self.check_and_reset_odometry()
+
+    
+    def odom_true_callback(self, msg: Odometry) -> None:
+        """
+        Callback function for handling odometry messages.
+        """
+
+        self.robot_true_x_m = msg.pose.pose.position.x
+        self.robot_true_y_m = msg.pose.pose.position.y
+
+        # fmt: off
+        orientation_q = msg.pose.pose.orientation
+        quaternion = [orientation_q.x, orientation_q.y, orientation_q.z, orientation_q.w,]
+        _, _, yaw = tf_transformations.euler_from_quaternion(quaternion)
+        self.robot_true_theta_rad = yaw
+
 
     def plot_callback(self) -> None:
         """
@@ -320,62 +372,62 @@ class HistogramFilter(Node):
         if len(self.scan_data) < INITIAL_POINTS:
             return
 
-        self.ax[0].cla()
-        self.ax[1].cla()
-        self.ax[2].cla()
+        self.ax.cla()
+        # self.ax[1].cla()
+        # self.ax[2].cla()
 
-        # Plot Current Scan Data
-        self.ax[0].plot(
-            self.current_scan_data,
-            label="Current LaserScan Data",
-            color="#16FF00",
-            linewidth=2,
-        )
-        self.ax[0].fill_between(
-            range(len(self.current_scan_data)),
-            self.current_scan_data,
-            color="#16FF00",
-            alpha=0.3
-        )
+        # # Plot Current Scan Data
+        # self.ax[0].plot(
+        #     self.current_scan_data,
+        #     label="Current LaserScan Data",
+        #     color="#16FF00",
+        #     linewidth=2,
+        # )
+        # self.ax[0].fill_between(
+        #     range(len(self.current_scan_data)),
+        #     self.current_scan_data,
+        #     color="#16FF00",
+        #     alpha=0.3
+        # )
 
-        if self.closest_scan_data is None:
-            return
+        # if self.closest_scan_data is None:
+        #     return
 
-        self.ax[0].plot(
-            self.closest_scan_data.measurements,
-            label="Closest LaserScan Data",
-            color="magenta",
-            linewidth=2,
-            linestyle='dashed',
-        )
-        self.ax[0].fill_between(
-            range(len(self.closest_scan_data.measurements)),
-            self.closest_scan_data.measurements,
-            color="magenta",
-            alpha=0.3
-        )
-        self.ax[0].set_xlabel("θ [°]", fontsize=12)
-        self.ax[0].set_ylabel("Distance [m]", fontsize=12)
-        self.ax[0].grid()
-        self.ax[0].legend()
+        # self.ax[0].plot(
+        #     self.closest_scan_data.measurements,
+        #     label="Closest LaserScan Data",
+        #     color="magenta",
+        #     linewidth=2,
+        #     linestyle='dashed',
+        # )
+        # self.ax[0].fill_between(
+        #     range(len(self.closest_scan_data.measurements)),
+        #     self.closest_scan_data.measurements,
+        #     color="magenta",
+        #     alpha=0.3
+        # )
+        # self.ax[0].set_xlabel("θ [°]", fontsize=12)
+        # self.ax[0].set_ylabel("Distance [m]", fontsize=12)
+        # self.ax[0].grid()
+        # self.ax[0].legend()
 
-        # Plot the histogram of the current scan data
-        hist, bin_edges = np.histogram(self.current_scan_data, range=self.histogram_range_m, bins=self.histogram_bins)
-        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-        bin_width = bin_edges[1] - bin_edges[0]
+        # # Plot the histogram of the current scan data
+        # hist, bin_edges = np.histogram(self.current_scan_data, range=self.histogram_range_m, bins=self.histogram_bins)
+        # bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        # bin_width = bin_edges[1] - bin_edges[0]
 
-        self.ax[1].bar(bin_centers, hist, align="center", width=bin_width, edgecolor="#023EFF", color="#00ffff")
+        # self.ax[1].bar(bin_centers, hist, align="center", width=bin_width, edgecolor="#023EFF", color="#00ffff")
 
-        self.ax[1].set_xlabel("Distance [m]", fontsize=12)
-        self.ax[1].set_ylabel("Measurements Count", fontsize=12)
-        self.ax[1].set_xticks(bin_edges)
-        self.ax[1].tick_params(axis='both', which='major', labelsize=10)
-        self.ax[1].set_xlim(self.histogram_range_m)
-        self.ax[1].xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{x:.2f}'))
-        self.ax[1].grid()
+        # self.ax[1].set_xlabel("Distance [m]", fontsize=12)
+        # self.ax[1].set_ylabel("Measurements Count", fontsize=12)
+        # self.ax[1].set_xticks(bin_edges)
+        # self.ax[1].tick_params(axis='both', which='major', labelsize=10)
+        # self.ax[1].set_xlim(self.histogram_range_m)
+        # self.ax[1].xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{x:.2f}'))
+        # self.ax[1].grid()
 
         # Plot the Probabilities
-        scatter = self.ax[2].scatter(
+        scatter = self.ax.scatter(
             [x[0] for x in self.probabilties_coords],
             [x[1] for x in self.probabilties_coords],
             s=128,
@@ -384,6 +436,23 @@ class HistogramFilter(Node):
             marker='s',
         )
 
+        # Plot odometry robot position
+        self.ax.scatter(self.robot_x_m_o, self.robot_y_m_o, color='orange', marker='o', s=150, label="Odometry Robot Position")
+        # Plot a dashed circle around the odometry robot position
+        circle = plt.Circle((self.robot_x_m_o, self.robot_y_m_o), THRESHOLD, color='blue', alpha=0.1, linestyle='dashed')
+        self.ax.add_patch(circle)
+        # annotate the odometry robot position
+        self.ax.text(self.robot_x_m_o, self.robot_y_m_o, f'Odometry\n({self.robot_x_m_o:.2f},{self.robot_y_m_o:.2f})', fontsize=9, ha='left', color='orange')
+
+        # plot robot true position
+        self.ax.scatter(self.robot_true_x_m, self.robot_true_y_m, color='red', marker='o', s=150, label="True Robot Position")
+        # annotate the true robot position
+        self.ax.text(self.robot_true_x_m, self.robot_true_y_m, f'True\n({self.robot_true_x_m:.2f},{self.robot_true_y_m:.2f})', fontsize=9, ha='right', color='red')
+
+        # Plot arrow of true robot orientation
+        self.ax.quiver(self.robot_true_x_m, self.robot_true_y_m, np.cos(self.robot_true_theta_rad), np.sin(self.robot_true_theta_rad), color='red', scale=10, scale_units='xy', angles='xy')
+        
+
         # Create a list of tuples with each probability and its corresponding coordinates
         probabilities_with_coords = list(zip(self.probabilities, self.probabilties_coords))
 
@@ -391,11 +460,18 @@ class HistogramFilter(Node):
         sorted_probabilities_with_coords = sorted(probabilities_with_coords, key=lambda x: x[0], reverse=True)
 
         # # Iterate over the sorted list and annotate the points in the center
-        # for rank, (probability, (x, y, _)) in enumerate(sorted_probabilities_with_coords, start=1):
-        #     self.ax[2].annotate(f"{rank}", (x, y), fontsize=10, color='#00ff00', ha='center', va='center')
+        for rank, (probability, (x, y, _)) in enumerate(sorted_probabilities_with_coords, start=1):
+            self.ax.annotate(f"{rank}", (x, y), fontsize=10, color='#00ff00', ha='center', va='center')
+            self.ax.text(x, y, f'({x:.2f},{y:.2f})', fontsize=9, ha='left', color='black')
+
+        # Exclude refrence poitns that are not in the circle and mark them grey
+        for scan in self.scan_data:
+            distance = np.linalg.norm([self.robot_x_m_o - scan.position[0], self.robot_y_m_o - scan.position[1]])
+            if distance > THRESHOLD:
+                self.ax.scatter(scan.position[0], scan.position[1], color='grey', marker='s', s=100, label="Reference Points")
 
         if self.cbar_flag:
-            cbar = plt.colorbar(scatter, ax=self.ax[2])
+            cbar = plt.colorbar(scatter, ax=self.ax)
             cbar.set_label('Probability')
             cbar.set_ticks([]) 
             self.cbar_flag = False
@@ -407,10 +483,19 @@ class HistogramFilter(Node):
             cbar_ax.text(1.25, 1, 'Most\nProbable\nLocation', ha='left', va='top', transform=cbar_ax.transAxes)
             
 
-        self.ax[2].set_xlabel("X [m]",fontsize=14)
-        self.ax[2].set_ylabel("Y [m]",fontsize=14)
-        #set tick size
-        self.ax[2].tick_params(axis='both', which='major', labelsize=12)
+        self.ax.set_xlabel("X [m]",fontsize=14)
+        self.ax.set_ylabel("Y [m]",fontsize=14)
+        #set tic0k size
+        self.ax.tick_params(axis='both', which='major', labelsize=12)
+        # set plot ax2 to const size
+        self.ax.set_xlim(-0.65, 0.65)
+        self.ax.set_ylim(-0.65, 0.65)
+        self.ax.grid()
+
+        #Log odometry, hfilter and true robot positions
+        self.get_logger().info(f"Odometry: ({self.robot_x_m_o:.2f}, {self.robot_y_m_o:.2f})")
+        self.get_logger().info(f"Histogram Filter: ({self.robot_x_m:.2f}, {self.robot_y_m:.2f})")
+        self.get_logger().info(f"True Robot: ({self.robot_true_x_m:.2f}, {self.robot_true_y_m:.2f})")
         
         plt.draw()
         plt.pause(0.00001)
